@@ -42,105 +42,145 @@ def carregar_melhores_parametros_json(ativo):
         logger.warning(f"Arquivo JSON de resultados não encontrado: {ARQUIVO_RESULTADOS}")
         return {}
 
-    with open(ARQUIVO_RESULTADOS, "r", encoding="utf-8") as f:
-        dados = json.load(f)
+    try:
+        with open(ARQUIVO_RESULTADOS, "r", encoding="utf-8") as f:
+            dados = json.load(f)
+    except Exception as e:
+        logger.error(f"Erro lendo JSON {ARQUIVO_RESULTADOS}: {e}")
+        return {}
 
-    resultados_ativo = [x for x in dados if x['ativo'] == ativo]
+    resultados_ativo = [x for x in dados if x.get('ativo') == ativo]
     if not resultados_ativo:
         return {}
 
-    melhor = max(resultados_ativo, key=lambda x: x['lucro'])
-    logger.info(f"Melhor backtest JSON para {ativo}: lucro={melhor['lucro']}, params={melhor['params']}")
-    return melhor['params']
+    # escolhe pelo maior lucro (poderia aplicar tie-breakers)
+    melhor = max(resultados_ativo, key=lambda x: x.get('lucro', -1))
+    logger.info(f"Melhor backtest JSON para {ativo}: lucro={melhor.get('lucro')} , params={melhor.get('params')}")
+    return melhor.get('params', {})
 
 # === FUNÇÕES MT5 ===
 def initialize_mt5(retries: int = 3, delay: float = 2.0):
     for tentativa in range(retries):
-        if mt5.initialize():
+        try:
+            ok = mt5.initialize()
+        except Exception as e:
+            logger.warning(f"mt5.initialize() gerou exceção: {e}")
+            ok = False
+        if ok:
             logger.info("✅ Conexão com MetaTrader 5 estabelecida.")
             return True
         else:
             logger.warning(f"Tentativa {tentativa+1}/{retries} falhou ao conectar ao MT5.")
             time.sleep(delay)
-    raise RuntimeError("❌ Falha ao conectar ao MetaTrader 5 após múltiplas tentativas.")
+    logger.error("❌ Falha ao conectar ao MetaTrader 5 após múltiplas tentativas.")
+    return False  # não lançar exceção para o resto do app lidar
 
 def selecionar_simbolo(simbolo: str):
-    if mt5.symbol_select(simbolo, True):
-        logger.info(f"✅ Símbolo {simbolo} selecionado no MT5")
-        return True
-    logger.warning(f"⚠️ Símbolo {simbolo} não encontrado no MT5")
-    return False
+    try:
+        if mt5.symbol_select(simbolo, True):
+            logger.info(f"✅ Símbolo {simbolo} selecionado no MT5")
+            return True
+        logger.warning(f"⚠️ Símbolo {simbolo} não encontrado no MT5")
+        return False
+    except Exception as e:
+        logger.error(f"Erro selecionar_simbolo({simbolo}): {e}")
+        return False
 
 def executar_ordem(symbol, sinal, preco, sl, tp, volume, tp_id):
     """
     Envia ordem para o MT5 com segurança:
     - corrige ask/bid
     - adiciona deviation
-    - adiciona type_filling obrigatório
-    - ajusta volume corretamente
+    - usa type_filling com fallback (FOK -> IOC)
+    - ajusta volume corretamente de acordo com symbol_info
+    - arredonda SL/TP conforme digits
+    Retorna True se a ordem foi aceita (retcode == TRADE_RETCODE_DONE)
     """
+    try:
+        if not mt5.symbol_select(symbol, True):
+            logger.error(f"[executar_ordem] Não foi possível selecionar símbolo: {symbol}")
+            return False
 
-    # --- Seleciona ativo ---
-    if not mt5.symbol_select(symbol, True):
-        print(f"[ERRO] Não foi possível selecionar símbolo: {symbol}")
+        info = mt5.symbol_info(symbol)
+        if info is None:
+            logger.error(f"[executar_ordem] symbol_info retornou None para {symbol}")
+            return False
+
+        # Ajuste volume para mínimo e step
+        try:
+            vol_min = float(info.volume_min) if info.volume_min else 0.0
+            vol_step = float(info.volume_step) if info.volume_step else 0.0
+        except Exception:
+            vol_min = 0.0
+            vol_step = 0.0
+
+        # garante volume >= volume_min
+        if vol_min > 0:
+            if volume < vol_min:
+                logger.debug(f"[executar_ordem] volume {volume} < volume_min {vol_min}, ajustando")
+                volume = vol_min
+
+        # aproxima pelo passo (volume_step)
+        if vol_step and vol_step > 0:
+            # round to nearest step (and ensure not below min)
+            n = round(volume / vol_step)
+            volume = max(vol_min, n * vol_step)
+
+        # escolher price corretamente
+        if sinal.upper() == "COMPRA":
+            price = float(info.ask) if hasattr(info, 'ask') else float(preco)
+            order_type = mt5.ORDER_TYPE_BUY
+        else:
+            price = float(info.bid) if hasattr(info, 'bid') else float(preco)
+            order_type = mt5.ORDER_TYPE_SELL
+
+        # Arredonda SL/TP de acordo com digits do símbolo, se disponível
+        digits = int(info.digits) if hasattr(info, 'digits') and info.digits is not None else None
+        if digits is not None:
+            sl = round(float(sl), digits)
+            tp = round(float(tp), digits)
+            price = round(price, digits)
+
+        request = {
+            "action": mt5.TRADE_ACTION_DEAL,
+            "symbol": symbol,
+            "type": order_type,
+            "volume": float(volume),
+            "price": float(price),
+            "sl": float(sl),
+            "tp": float(tp),
+            "magic": 20250125 + tp_id,  # magic base + tp id (diferencia as ordens)
+            "deviation": 20,
+            "type_time": mt5.ORDER_TIME_GTC,
+            # tente FOK primeiro (requerido por alguns brokers), senão IOC
+            "type_filling": getattr(mt5, "ORDER_FILLING_FOK", getattr(mt5, "ORDER_FILLING_IOC", mt5.ORDER_FILLING_IOC)),
+            "comment": f"IA_TP{tp_id}"
+        }
+
+        result = mt5.order_send(request)
+        if result is None:
+            logger.error(f"[executar_ordem] MT5 retornou None para request: {request}")
+            return False
+
+        # log detalhado
+        try:
+            retcode = getattr(result, 'retcode', None)
+            comment = getattr(result, 'comment', '')
+            logger.info(f"[executar_ordem] result.retcode={retcode}, comment={comment}, symbol={symbol}, sinal={sinal}, price={price}, vol={volume}")
+        except Exception:
+            logger.info(f"[executar_ordem] Ordem enviada (resultado não padrão) para {symbol}")
+
+        # sucesso: TRADE_RETCODE_DONE
+        if hasattr(mt5, "TRADE_RETCODE_DONE") and result.retcode == mt5.TRADE_RETCODE_DONE:
+            return True
+
+        # alguns retcodes específicos podem ser aceitos conforme broker; log completo e retornar False
+        logger.warning(f"[executar_ordem] Ordem rejeitada. retcode={getattr(result, 'retcode', None)} comment={getattr(result, 'comment', '')}")
         return False
 
-    info = mt5.symbol_info(symbol)
-    if info is None:
-        print(f"[ERRO] Info do símbolo não encontrada: {symbol}")
+    except Exception as e:
+        logger.error(f"[executar_ordem] Exceção ao enviar ordem {symbol} {sinal}: {e}")
         return False
-
-    # --- Volume mínimo / step ---
-    if info.volume_min > 0:
-        volume = max(volume, info.volume_min)
-
-    if info.volume_step > 0:
-        volume = round(volume / info.volume_step) * info.volume_step
-
-    # --- Corrigir PREÇO ---
-    # COMPRA usa ASK
-    # VENDA usa BID
-    if sinal == "COMPRA":
-        price = info.ask
-        order_type = mt5.ORDER_TYPE_BUY
-    else:
-        price = info.bid
-        order_type = mt5.ORDER_TYPE_SELL
-
-    # Corrigir SL/TP para decimais
-    sl = round(sl, info.digits)
-    tp = round(tp, info.digits)
-
-    # --- Preencher request ---
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": symbol,
-        "type": order_type,
-        "volume": float(volume),
-        "price": float(price),
-        "sl": float(sl),
-        "tp": float(tp),
-        "magic": 20250125,            # identificador das ordens
-        "deviation": 20,               # margem para evitar rejeição
-        "type_filling": mt5.ORDER_FILLING_FOK,  # obrigatório para B3
-        "type_time": mt5.ORDER_TIME_GTC,
-        "comment": f"TP{tp_id}"
-    }
-
-    # --- Enviar ---
-    result = mt5.order_send(request)
-
-    # --- Verificar retorno ---
-    if result is None:
-        print("[ERRO] MT5 não respondeu.")
-        return False
-
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        print(f"[ERRO] Ordem rejeitada. Retcode={result.retcode}")
-        return False
-
-    print(f"[OK] Ordem enviada: {symbol} | {sinal} | TP{tp_id}")
-    return True
 
 # === INDICADORES ===
 def calculate_rsi(series, period=14):
@@ -191,19 +231,44 @@ def carregar_cache(simbolo):
     cache_path = os.path.join(log_dir, f"{simbolo}_cache.csv")
     with filelock.FileLock(f"{cache_path}.lock"):
         if os.path.exists(cache_path):
-            return pd.read_csv(cache_path)
+            try:
+                return pd.read_csv(cache_path)
+            except Exception as e:
+                logger.error(f"carregar_cache: erro lendo {cache_path}: {e}")
+                return pd.DataFrame(columns=['time','open','high','low','close','tick_volume','spread','real_volume'])
     return pd.DataFrame(columns=['time','open','high','low','close','tick_volume','spread','real_volume'])
 
 def salvar_cache_db(df, simbolo):
     cache_path = os.path.join(log_dir, f"{simbolo}_cache.csv")
     with filelock.FileLock(f"{cache_path}.lock"):
-        df.to_csv(cache_path, index=False)
+        try:
+            df.to_csv(cache_path, index=False)
+        except Exception as e:
+            logger.error(f"salvar_cache_db: erro escrevendo {cache_path}: {e}")
 
 def salvar_sinal_db(ativo, sinal, preco, confianca):
+    """
+    Salva sinal em CSV. Usa filelock e tenta fallback se ocorrer PermissionError.
+    """
     log_path = os.path.join(log_dir, "sinais_ao_vivo.csv")
-    with filelock.FileLock(f"{log_path}.lock"):
-        with open(log_path,"a",encoding="utf-8") as f:
-            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{ativo},{sinal},{preco},{confianca:.1f},OK\n")
+    try:
+        with filelock.FileLock(f"{log_path}.lock"):
+            with open(log_path,"a",encoding="utf-8") as f:
+                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{ativo},{sinal},{preco},{confianca:.3f},OK\n")
+        logger.info(f"Sinal salvo em {log_path}: {ativo} {sinal} {preco} {confianca:.3f}")
+    except PermissionError as pe:
+        logger.warning(f"PermissionError salvando sinal em {log_path}: {pe} - tentando fallback no projeto")
+        # fallback: gravar em arquivo dentro do projeto (user home)
+        fallback_path = os.path.join(str(Path.home()), "ia_finance_sinais_ao_vivo.csv")
+        try:
+            with filelock.FileLock(f"{fallback_path}.lock"):
+                with open(fallback_path, "a", encoding="utf-8") as f:
+                    f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{ativo},{sinal},{preco},{confianca:.3f},OK\n")
+            logger.info(f"Sinal salvo em fallback {fallback_path}")
+        except Exception as e:
+            logger.error(f"Falha ao salvar sinal em fallback {fallback_path}: {e}")
+    except Exception as e:
+        logger.error(f"Erro salvando sinal: {e}")
 
 # === NOTÍCIAS ===
 def analisar_noticias():
@@ -225,7 +290,8 @@ def analisar_noticias():
                 titulo = (entry.title + " " + getattr(entry,'summary','')).lower()
                 if any(p in titulo for p in palavras_alto_risco):
                     score_risco += 0.4
-        except:
+        except Exception as e:
+            logger.debug(f"analisar_noticias: erro feed {feed_url}: {e}")
             continue
     score_risco = min(1.0, score_risco)
     cache_noticias = score_risco
@@ -234,11 +300,14 @@ def analisar_noticias():
 
 # === IA PRINCIPAL ===
 def gerar_sinal_IA(simbolo, timeframe, lookback=200):
-    global ultimo_sinal
-    # Carrega melhores parâmetros do JSON
-    params_ativo = carregar_melhores_parametros_json(simbolo)
-    if params_ativo:
-        melhores_params.update(params_ativo)
+    global ultimo_sinal, melhores_params
+    # Carrega melhores parâmetros do JSON (se existir) e atualiza melhores_params local
+    try:
+        params_ativo = carregar_melhores_parametros_json(simbolo)
+        if params_ativo:
+            melhores_params.update(params_ativo)
+    except Exception as e:
+        logger.debug(f"gerar_sinal_IA: erro ao carregar params JSON: {e}")
 
     params = {
         "ema_curta": melhores_params.get("ema_curta", 9),
@@ -255,11 +324,18 @@ def gerar_sinal_IA(simbolo, timeframe, lookback=200):
     hora_min = agora.hour*60 + agora.minute
     mercado_aberto = 600 <= hora_min <= 1050
 
-    rates = mt5.copy_rates_from_pos(simbolo, timeframe, 0, lookback)
+    # tenta buscar do MT5
+    try:
+        rates = mt5.copy_rates_from_pos(simbolo, timeframe, 0, lookback)
+    except Exception as e:
+        logger.error(f"gerar_sinal_IA: mt5.copy_rates_from_pos erro: {e}")
+        return None, None
+
     if rates is None or len(rates) == 0:
         return None, None
 
     df = pd.DataFrame(rates)
+    # garantir tipo float
     df['close'] = df['close'].astype(float)
     df['retorno'] = (df['close'] - df['close'].shift(1)) / df['close'].shift(1)
 
@@ -293,14 +369,28 @@ def gerar_sinal_IA(simbolo, timeframe, lookback=200):
     confianca = abs(ema_curta_atual - ema_longa_atual)/ema_longa_atual if ema_longa_atual !=0 else 0
     risco_noticias = analisar_noticias()
 
+    # Bloqueia sinais se notícias altas
     if risco_noticias > 0.5:
+        logger.warning(f"Bloqueio por noticias ({risco_noticias:.2f}) para {simbolo}")
         return None, ultimo_preco
 
+    # Se modelo treinou, usa previsão; senão fallback por cruzamento simples
     if modelo_local is not None:
-        previsao = modelo_local.predict([[ema_curta_atual, ema_longa_atual, volatilidade, rsi, macd, bb_position]])[0]
+        try:
+            previsao = modelo_local.predict([[ema_curta_atual, ema_longa_atual, volatilidade, rsi, macd, bb_position]])[0]
+        except Exception as e:
+            logger.debug(f"gerar_sinal_IA: predict error: {e}")
+            previsao = 1 if cruzamento_compra else -1 if cruzamento_venda else 0
     else:
         previsao = 1 if cruzamento_compra else -1 if cruzamento_venda else 0
 
+    # filtro extra: evitar repetição imediata do mesmo sinal
+    if ultimo_sinal == "COMPRA" and previsao == 1:
+        return None, ultimo_preco
+    if ultimo_sinal == "VENDA" and previsao == -1:
+        return None, ultimo_preco
+
+    # regras finais para enviar sinal
     if mercado_aberto and previsao==1 and cruzamento_compra and confianca>0.005:
         salvar_sinal_db(simbolo, "COMPRA", ultimo_preco, confianca)
         ultimo_sinal = "COMPRA"
