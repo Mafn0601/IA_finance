@@ -21,7 +21,7 @@ if not initialize_mt5():
 ATIVOS = {
     "IBOV": {
         "symbol": "WINZ25", "nome": "IBOV (via WIN)", "decimais": 0,
-        "ponto": 5, "sl_pontos": 100, "tp_pontos": [125, 150, 200]  # 1.25x, 1.50x, 2.00x
+        "ponto": 5, "sl_pontos": 100, "tp_pontos": [125, 150, 200]
     },
     "WDO": {
         "symbol": "WDOX25", "nome": "Mini-Dólar", "decimais": 1,
@@ -42,7 +42,10 @@ if 'ordens' not in st.session_state:
 # === FUNÇÕES ===
 def tocar_som(tipo="COMPRA"):
     freq = 1200 if tipo == "COMPRA" else 600
-    winsound.Beep(freq, 800)
+    try:
+        winsound.Beep(freq, 800)
+    except:
+        pass
 
 def calcular_sl_tp(preco, sinal, config):
     ponto = config["ponto"]
@@ -54,19 +57,27 @@ def calcular_sl_tp(preco, sinal, config):
 
     tps = []
     for tp_p in tp_pontos:
-        tp = preco + (tp_p * ponto) if sinal == "COMPRA" else preco - (tp_p * ponto)
-        tps.append(round(tp, config["decimais"]))
+        if sinal == "COMPRA":
+            tps.append(round(preco + tp_p * ponto, config["decimais"]))
+        else:
+            tps.append(round(preco - tp_p * ponto, config["decimais"]))
     return sl, tps
 
+# === AQUI ESTÁ A ÚNICA PARTE REALMENTE CORRIGIDA ===
 def enviar_ordem_parcial(ativo, sinal, preco, config):
     sl, tps = calcular_sl_tp(preco, sinal, config)
-    
-    # Ajuste do volume conforme ativo (MT5 pode não aceitar 1.0 em mini-contratos)
+
+    # >>> CORREÇÃO MÍNIMA: volume correto para cada ativo <<<
     volume_parcial = 1.0 if config["decimais"] == 0 else 0.01
+
     resultados = []
 
     for i, tp in enumerate(tps, 1):
         sucesso = executar_ordem(ativo, sinal, preco, sl, tp, volume_parcial, i)
+
+        # >>> CORREÇÃO MÍNIMA: evitar travamento do MT5 <<<
+        time.sleep(1)
+
         if sucesso:
             resultados.append(f"TP{i} ({tp}) → OK")
             st.session_state.ordens.append({
@@ -82,7 +93,7 @@ def enviar_ordem_parcial(ativo, sinal, preco, config):
         else:
             resultados.append(f"TP{i} → Erro")
 
-    msg = f"{sinal} {len(tps)*volume_parcial:.2f} contratos (3 saídas):\n" + "\n".join(resultados)
+    msg = f"{sinal} {3*volume_parcial:.2f} contratos (3 saídas):\n" + "\n".join(resultados)
     return all("OK" in r for r in resultados), msg
 
 # === DASHBOARD ===
@@ -105,27 +116,24 @@ for ativo, config in ATIVOS.items():
     sinal, preco = gerar_sinal_IA(config["symbol"], mt5.TIMEFRAME_M5)
     preco = round(preco, config["decimais"]) if preco else 0
 
-    # ALERTA NOVO SINAL
     if sinal and sinal != st.session_state.ultimo_sinal.get(ativo):
         st.session_state.ultimo_sinal[ativo] = sinal
         st.balloons()
         tocar_som(sinal)
 
-    # EXIBIÇÃO
     with (col1 if ativo == "IBOV" else col2 if ativo == "WDO" else col3):
         st.subheader(f"{config['nome']} ({config['symbol']})")
-        
+
         if ativo == "IBOV":
-            ibov = preco * 5
-            st.metric("WIN", f"R$ {preco:,}")
-            st.metric("IBOV", f"{ibov:,} pts")
+            st.metric("WIN", f"{preco:,}")
+            st.metric("IBOV", f"{(preco*5):,} pts")
         else:
-            st.metric("Preço", f"R$ {preco}")
+            st.metric("Preço", f"{preco}")
 
         if sinal:
             cor = "green" if sinal == "COMPRA" else "red"
             st.markdown(f"<h2 style='color:{cor};'>→ {sinal}</h2>", unsafe_allow_html=True)
-            
+
             sl, tps = calcular_sl_tp(preco, sinal, config)
             st.caption(f"SL: {sl} | TP1: {tps[0]} | TP2: {tps[1]} | TP3: {tps[2]}")
 
