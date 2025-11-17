@@ -1,4 +1,4 @@
-# backend/sinais.py — IA 5min + NOTÍCIAS + ORDENS + JSON
+# backend/sinais.py — IA 5min + NOTÍCIAS + ORDENS + JSON + LOCK
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
@@ -13,133 +13,144 @@ import time
 import json
 from pathlib import Path
 
-# === LOG ===
+# === CONFIG / PATHS ===
 log_dir = 'C:\\temp'
 os.makedirs(log_dir, exist_ok=True)
+LOCK_PATH = os.path.join(log_dir, "sinal_lock.txt")
+SINAIS_CSV = os.path.join(log_dir, "sinais_ao_vivo.csv")
+ARQUIVO_RESULTADOS = Path("C:/Users/Marco/ia_finance/resultados.json")
+
+# === LOG ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('IA_MT5')
 handler = logging.FileHandler(os.path.join(log_dir, 'ia_mt5.log'), encoding='utf-8')
 handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
-logger.addHandler(handler)
+if not logger.handlers:
+    logger.addHandler(handler)
+else:
+    # avoid duplicate handlers in reloads
+    logger.handlers = [handler]
 
-# === VARIÁVEIS GLOBAIS ===
+# === GLOBALS ===
 ultimo_sinal = None
 cache_local = {}
 ultima_verificacao_noticias = None
 cache_noticias = 0.0
 historico_dados = {}
 modelo = SGDClassifier(loss='log_loss', learning_rate='adaptive', eta0=0.01, random_state=42)
-melhores_params = {}  # ← armazenará os parâmetros da melhor estratégia
+melhores_params = {}
 
-# === JSON DE RESULTADOS ===
-ARQUIVO_RESULTADOS = Path("C:/Users/Marco/ia_finance/resultados.json")
+# ----------------------
+# LOCK helpers
+# ----------------------
+def sinal_bloqueado():
+    return os.path.exists(LOCK_PATH)
 
+def bloquear_sinal():
+    try:
+        with open(LOCK_PATH, "w") as f:
+            f.write(str(time.time()))
+        logger.info("🔒 Lock criado: sinal bloqueado")
+        return True
+    except Exception as e:
+        logger.error(f"Erro criar lock: {e}")
+        return False
+
+def liberar_sinal():
+    try:
+        if os.path.exists(LOCK_PATH):
+            os.remove(LOCK_PATH)
+            logger.info("🔓 Lock removido: sinais liberados")
+    except Exception as e:
+        logger.error(f"Erro remover lock: {e}")
+
+# ----------------------
+# JSON loaders
+# ----------------------
 def carregar_melhores_parametros_json(ativo):
-    """
-    Carrega os parâmetros do melhor backtest do JSON para o ativo especificado.
-    """
     if not ARQUIVO_RESULTADOS.exists():
-        logger.warning(f"Arquivo JSON de resultados não encontrado: {ARQUIVO_RESULTADOS}")
+        logger.debug(f"Arquivo JSON não existe: {ARQUIVO_RESULTADOS}")
         return {}
-
     try:
         with open(ARQUIVO_RESULTADOS, "r", encoding="utf-8") as f:
             dados = json.load(f)
     except Exception as e:
         logger.error(f"Erro lendo JSON {ARQUIVO_RESULTADOS}: {e}")
         return {}
-
     resultados_ativo = [x for x in dados if x.get('ativo') == ativo]
     if not resultados_ativo:
         return {}
-
-    # escolhe pelo maior lucro (poderia aplicar tie-breakers)
     melhor = max(resultados_ativo, key=lambda x: x.get('lucro', -1))
-    logger.info(f"Melhor backtest JSON para {ativo}: lucro={melhor.get('lucro')} , params={melhor.get('params')}")
     return melhor.get('params', {})
 
-# === FUNÇÕES MT5 ===
-def initialize_mt5(retries: int = 3, delay: float = 2.0):
+# ----------------------
+# MT5 helpers
+# ----------------------
+def initialize_mt5(retries: int = 3, delay: float = 1.0):
     for tentativa in range(retries):
         try:
             ok = mt5.initialize()
         except Exception as e:
-            logger.warning(f"mt5.initialize() gerou exceção: {e}")
+            logger.warning(f"mt5.initialize() exceção: {e}")
             ok = False
         if ok:
-            logger.info("✅ Conexão com MetaTrader 5 estabelecida.")
+            logger.info("✅ MT5 inicializado")
             return True
-        else:
-            logger.warning(f"Tentativa {tentativa+1}/{retries} falhou ao conectar ao MT5.")
-            time.sleep(delay)
-    logger.error("❌ Falha ao conectar ao MetaTrader 5 após múltiplas tentativas.")
-    return False  # não lançar exceção para o resto do app lidar
+        time.sleep(delay)
+    logger.error("❌ Falha ao inicializar MT5")
+    return False
 
 def selecionar_simbolo(simbolo: str):
     try:
-        if mt5.symbol_select(simbolo, True):
-            logger.info(f"✅ Símbolo {simbolo} selecionado no MT5")
+        ok = mt5.symbol_select(simbolo, True)
+        if ok:
+            logger.debug(f"Símbolo selecionado: {simbolo}")
             return True
-        logger.warning(f"⚠️ Símbolo {simbolo} não encontrado no MT5")
-        return False
+        else:
+            logger.warning(f"symbol_select falhou: {simbolo}")
+            return False
     except Exception as e:
-        logger.error(f"Erro selecionar_simbolo({simbolo}): {e}")
+        logger.error(f"selecionar_simbolo erro: {e}")
         return False
 
 def executar_ordem(symbol, sinal, preco, sl, tp, volume, tp_id):
-    """
-    Envia ordem para o MT5 com segurança:
-    - corrige ask/bid
-    - adiciona deviation
-    - usa type_filling com fallback (FOK -> IOC)
-    - ajusta volume corretamente de acordo com symbol_info
-    - arredonda SL/TP conforme digits
-    Retorna True se a ordem foi aceita (retcode == TRADE_RETCODE_DONE)
-    """
+    """Envio seguro de ordem (ajusta price, volume, digits, filling, deviation)."""
     try:
         if not mt5.symbol_select(symbol, True):
-            logger.error(f"[executar_ordem] Não foi possível selecionar símbolo: {symbol}")
+            logger.error(f"executar_ordem: não selecionou {symbol}")
             return False
 
         info = mt5.symbol_info(symbol)
         if info is None:
-            logger.error(f"[executar_ordem] symbol_info retornou None para {symbol}")
+            logger.error(f"executar_ordem: info None para {symbol}")
             return False
 
-        # Ajuste volume para mínimo e step
+        # volume ajustado
         try:
             vol_min = float(info.volume_min) if info.volume_min else 0.0
             vol_step = float(info.volume_step) if info.volume_step else 0.0
         except Exception:
-            vol_min = 0.0
-            vol_step = 0.0
+            vol_min = 0.0; vol_step = 0.0
 
-        # garante volume >= volume_min
-        if vol_min > 0:
-            if volume < vol_min:
-                logger.debug(f"[executar_ordem] volume {volume} < volume_min {vol_min}, ajustando")
-                volume = vol_min
-
-        # aproxima pelo passo (volume_step)
-        if vol_step and vol_step > 0:
-            # round to nearest step (and ensure not below min)
+        if vol_min > 0 and volume < vol_min:
+            volume = vol_min
+        if vol_step > 0:
             n = round(volume / vol_step)
             volume = max(vol_min, n * vol_step)
 
-        # escolher price corretamente
+        # price (ask for buy, bid for sell)
         if sinal.upper() == "COMPRA":
-            price = float(info.ask) if hasattr(info, 'ask') else float(preco)
+            price = float(info.ask) if hasattr(info, "ask") else float(preco)
             order_type = mt5.ORDER_TYPE_BUY
         else:
-            price = float(info.bid) if hasattr(info, 'bid') else float(preco)
+            price = float(info.bid) if hasattr(info, "bid") else float(preco)
             order_type = mt5.ORDER_TYPE_SELL
 
-        # Arredonda SL/TP de acordo com digits do símbolo, se disponível
-        digits = int(info.digits) if hasattr(info, 'digits') and info.digits is not None else None
+        digits = int(info.digits) if hasattr(info,'digits') and info.digits is not None else None
         if digits is not None:
+            price = round(price, digits)
             sl = round(float(sl), digits)
             tp = round(float(tp), digits)
-            price = round(price, digits)
 
         request = {
             "action": mt5.TRADE_ACTION_DEAL,
@@ -149,47 +160,46 @@ def executar_ordem(symbol, sinal, preco, sl, tp, volume, tp_id):
             "price": float(price),
             "sl": float(sl),
             "tp": float(tp),
-            "magic": 20250125 + tp_id,  # magic base + tp id (diferencia as ordens)
+            "magic": 20250125 + int(tp_id),
             "deviation": 20,
             "type_time": mt5.ORDER_TIME_GTC,
-            # tente FOK primeiro (requerido por alguns brokers), senão IOC
             "type_filling": getattr(mt5, "ORDER_FILLING_FOK", getattr(mt5, "ORDER_FILLING_IOC", mt5.ORDER_FILLING_IOC)),
             "comment": f"IA_TP{tp_id}"
         }
 
         result = mt5.order_send(request)
         if result is None:
-            logger.error(f"[executar_ordem] MT5 retornou None para request: {request}")
+            logger.error(f"executar_ordem: MT5 retornou None para {symbol}")
             return False
 
-        # log detalhado
-        try:
-            retcode = getattr(result, 'retcode', None)
-            comment = getattr(result, 'comment', '')
-            logger.info(f"[executar_ordem] result.retcode={retcode}, comment={comment}, symbol={symbol}, sinal={sinal}, price={price}, vol={volume}")
-        except Exception:
-            logger.info(f"[executar_ordem] Ordem enviada (resultado não padrão) para {symbol}")
-
-        # sucesso: TRADE_RETCODE_DONE
-        if hasattr(mt5, "TRADE_RETCODE_DONE") and result.retcode == mt5.TRADE_RETCODE_DONE:
+        # log retcode & comment
+        logger.info(f"executar_ordem result: symbol={symbol} retcode={getattr(result,'retcode',None)} comment={getattr(result,'comment','')}")
+        if hasattr(mt5, "TRADE_RETCODE_DONE") and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE:
             return True
 
-        # alguns retcodes específicos podem ser aceitos conforme broker; log completo e retornar False
-        logger.warning(f"[executar_ordem] Ordem rejeitada. retcode={getattr(result, 'retcode', None)} comment={getattr(result, 'comment', '')}")
+        # não ok
+        logger.warning(f"executar_ordem rejeitada: retcode={getattr(result,'retcode',None)} comment={getattr(result,'comment','')}")
         return False
-
     except Exception as e:
-        logger.error(f"[executar_ordem] Exceção ao enviar ordem {symbol} {sinal}: {e}")
+        logger.error(f"executar_ordem exceção: {e}")
         return False
 
-# === INDICADORES ===
+# ----------------------
+# Indicadores / IA
+# ----------------------
+def calculate_ema(data, period):
+    if len(data) < period:
+        return None, None
+    s = pd.Series(data).ewm(span=period, adjust=False).mean()
+    return s.iloc[-1], s.iloc[-2] if len(s) > 1 else s.iloc[-1]
+
 def calculate_rsi(series, period=14):
     delta = series.diff()
     if len(delta.dropna()) < period + 1:
         return np.nan
     gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-    rs = gain / loss
+    rs = gain / (loss + 1e-9)
     return (100 - (100 / (1 + rs))).iloc[-1]
 
 def calculate_macd(series, fast=12, slow=26, signal=9):
@@ -204,13 +214,6 @@ def calculate_bollinger(series, window=20, stds=2):
     std = series.rolling(window).std()
     return sma.iloc[-1] + (stds*std.iloc[-1]), sma.iloc[-1], sma.iloc[-1] - (stds*std.iloc[-1])
 
-def calculate_ema(data, period):
-    if len(data) < 5:
-        return None, None
-    ema_series = pd.Series(data).ewm(span=period, adjust=False).mean()
-    return ema_series.iloc[-1], ema_series.iloc[-2]
-
-# === MODELO ===
 def treinar_modelo_IA(dados, simbolo):
     global historico_dados, modelo
     if simbolo not in historico_dados:
@@ -223,10 +226,16 @@ def treinar_modelo_IA(dados, simbolo):
     y = historico_dados[simbolo]['sinal'].values
     if len(X) < 2 or np.any(np.isnan(X)):
         return None
-    modelo.partial_fit(X, y, classes=[-1,0,1])
+    try:
+        modelo.partial_fit(X, y, classes=[-1,0,1])
+    except Exception as e:
+        logger.debug(f"treinar_modelo_IA partial_fit erro: {e}")
+        return None
     return modelo
 
-# === FUNÇÕES DE CACHE / DB ===
+# ----------------------
+# Cache / CSV
+# ----------------------
 def carregar_cache(simbolo):
     cache_path = os.path.join(log_dir, f"{simbolo}_cache.csv")
     with filelock.FileLock(f"{cache_path}.lock"):
@@ -235,8 +244,8 @@ def carregar_cache(simbolo):
                 return pd.read_csv(cache_path)
             except Exception as e:
                 logger.error(f"carregar_cache: erro lendo {cache_path}: {e}")
-                return pd.DataFrame(columns=['time','open','high','low','close','tick_volume','spread','real_volume'])
-    return pd.DataFrame(columns=['time','open','high','low','close','tick_volume','spread','real_volume'])
+                return pd.DataFrame()
+    return pd.DataFrame()
 
 def salvar_cache_db(df, simbolo):
     cache_path = os.path.join(log_dir, f"{simbolo}_cache.csv")
@@ -247,30 +256,43 @@ def salvar_cache_db(df, simbolo):
             logger.error(f"salvar_cache_db: erro escrevendo {cache_path}: {e}")
 
 def salvar_sinal_db(ativo, sinal, preco, confianca):
-    """
-    Salva sinal em CSV. Usa filelock e tenta fallback se ocorrer PermissionError.
-    """
-    log_path = os.path.join(log_dir, "sinais_ao_vivo.csv")
+    """Salva sinal (CSV) e cria lock para impedir novos sinais até ordem fechar."""
     try:
-        with filelock.FileLock(f"{log_path}.lock"):
-            with open(log_path,"a",encoding="utf-8") as f:
-                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{ativo},{sinal},{preco},{confianca:.3f},OK\n")
-        logger.info(f"Sinal salvo em {log_path}: {ativo} {sinal} {preco} {confianca:.3f}")
-    except PermissionError as pe:
-        logger.warning(f"PermissionError salvando sinal em {log_path}: {pe} - tentando fallback no projeto")
-        # fallback: gravar em arquivo dentro do projeto (user home)
-        fallback_path = os.path.join(str(Path.home()), "ia_finance_sinais_ao_vivo.csv")
-        try:
-            with filelock.FileLock(f"{fallback_path}.lock"):
-                with open(fallback_path, "a", encoding="utf-8") as f:
-                    f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{ativo},{sinal},{preco},{confianca:.3f},OK\n")
-            logger.info(f"Sinal salvo em fallback {fallback_path}")
-        except Exception as e:
-            logger.error(f"Falha ao salvar sinal em fallback {fallback_path}: {e}")
-    except Exception as e:
-        logger.error(f"Erro salvando sinal: {e}")
+        # Se já existe lock, ignora
+        if sinal_bloqueado():
+            logger.info("salvar_sinal_db: lock presente -> ignorando gravação")
+            return False
 
-# === NOTÍCIAS ===
+        # grava CSV com filelock
+        with filelock.FileLock(f"{SINAIS_CSV}.lock"):
+            new = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{ativo},{sinal},{preco},{confianca:.3f},OK\n"
+            with open(SINAIS_CSV, "a", encoding="utf-8") as f:
+                f.write(new)
+        logger.info(f"Sinal salvo: {ativo} {sinal} {preco} conf={confianca:.3f}")
+
+        # bloqueia novos sinais
+        bloquear_sinal()
+        return True
+    except PermissionError as pe:
+        logger.warning(f"PermissionError salvar_sinal_db: {pe} - tentando fallback no home")
+        try:
+            fallback = os.path.join(str(Path.home()), "ia_finance_sinais_ao_vivo.csv")
+            with filelock.FileLock(f"{fallback}.lock"):
+                with open(fallback, "a", encoding="utf-8") as f:
+                    f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')},{ativo},{sinal},{preco},{confianca:.3f},OK\n")
+            bloquear_sinal()
+            logger.info(f"Sinal salvo em fallback {fallback}")
+            return True
+        except Exception as e:
+            logger.error(f"Falha fallback salvar_sinal_db: {e}")
+            return False
+    except Exception as e:
+        logger.error(f"salvar_sinal_db erro: {e}")
+        return False
+
+# ----------------------
+# NOTÍCIAS
+# ----------------------
 def analisar_noticias():
     global ultima_verificacao_noticias, cache_noticias
     agora = datetime.now()
@@ -291,23 +313,30 @@ def analisar_noticias():
                 if any(p in titulo for p in palavras_alto_risco):
                     score_risco += 0.4
         except Exception as e:
-            logger.debug(f"analisar_noticias: erro feed {feed_url}: {e}")
+            logger.debug(f"analisar_noticias: {e}")
             continue
-    score_risco = min(1.0, score_risco)
-    cache_noticias = score_risco
+    cache_noticias = min(1.0, score_risco)
     ultima_verificacao_noticias = agora
-    return score_risco
+    return cache_noticias
 
-# === IA PRINCIPAL ===
+# ----------------------
+# gerar_sinal_IA (com lock check)
+# ----------------------
 def gerar_sinal_IA(simbolo, timeframe, lookback=200):
     global ultimo_sinal, melhores_params
-    # Carrega melhores parâmetros do JSON (se existir) e atualiza melhores_params local
+
+    # não gerar se lock ativo
+    if sinal_bloqueado():
+        logger.debug("gerar_sinal_IA: lock ativo, não gera sinal")
+        return None, None
+
+    # atualiza params do JSON
     try:
         params_ativo = carregar_melhores_parametros_json(simbolo)
         if params_ativo:
             melhores_params.update(params_ativo)
     except Exception as e:
-        logger.debug(f"gerar_sinal_IA: erro ao carregar params JSON: {e}")
+        logger.debug(f"erro carregar params json: {e}")
 
     params = {
         "ema_curta": melhores_params.get("ema_curta", 9),
@@ -320,11 +349,6 @@ def gerar_sinal_IA(simbolo, timeframe, lookback=200):
         "bb_std": melhores_params.get("bb_std", 2)
     }
 
-    agora = datetime.now()
-    hora_min = agora.hour*60 + agora.minute
-    mercado_aberto = 600 <= hora_min <= 1050
-
-    # tenta buscar do MT5
     try:
         rates = mt5.copy_rates_from_pos(simbolo, timeframe, 0, lookback)
     except Exception as e:
@@ -335,9 +359,8 @@ def gerar_sinal_IA(simbolo, timeframe, lookback=200):
         return None, None
 
     df = pd.DataFrame(rates)
-    # garantir tipo float
     df['close'] = df['close'].astype(float)
-    df['retorno'] = (df['close'] - df['close'].shift(1)) / df['close'].shift(1)
+    df['retorno'] = (df['close'] - df['close'].shift(1)) / (df['close'].shift(1) + 1e-9)
 
     ema_curta_atual, ema_curta_anterior = calculate_ema(df['retorno'].dropna(), params["ema_curta"])
     ema_longa_atual, ema_longa_anterior = calculate_ema(df['retorno'].dropna(), params["ema_longa"])
@@ -366,38 +389,59 @@ def gerar_sinal_IA(simbolo, timeframe, lookback=200):
     })
 
     modelo_local = treinar_modelo_IA(dados_treino, simbolo)
-    confianca = abs(ema_curta_atual - ema_longa_atual)/ema_longa_atual if ema_longa_atual !=0 else 0
-    risco_noticias = analisar_noticias()
+    confianca = abs(ema_curta_atual - ema_longa_atual)/ (ema_longa_atual + 1e-9)
 
-    # Bloqueia sinais se notícias altas
+    risco_noticias = analisar_noticias()
     if risco_noticias > 0.5:
-        logger.warning(f"Bloqueio por noticias ({risco_noticias:.2f}) para {simbolo}")
+        logger.warning(f"Bloqueio por notícias ({risco_noticias:.2f})")
         return None, ultimo_preco
 
-    # Se modelo treinou, usa previsão; senão fallback por cruzamento simples
     if modelo_local is not None:
         try:
             previsao = modelo_local.predict([[ema_curta_atual, ema_longa_atual, volatilidade, rsi, macd, bb_position]])[0]
         except Exception as e:
-            logger.debug(f"gerar_sinal_IA: predict error: {e}")
+            logger.debug(f"predict error: {e}")
             previsao = 1 if cruzamento_compra else -1 if cruzamento_venda else 0
     else:
         previsao = 1 if cruzamento_compra else -1 if cruzamento_venda else 0
 
-    # filtro extra: evitar repetição imediata do mesmo sinal
+    # evita repetição imediata
     if ultimo_sinal == "COMPRA" and previsao == 1:
         return None, ultimo_preco
     if ultimo_sinal == "VENDA" and previsao == -1:
         return None, ultimo_preco
 
-    # regras finais para enviar sinal
-    if mercado_aberto and previsao==1 and cruzamento_compra and confianca>0.005:
-        salvar_sinal_db(simbolo, "COMPRA", ultimo_preco, confianca)
-        ultimo_sinal = "COMPRA"
-        return "COMPRA", ultimo_preco
-    elif mercado_aberto and previsao==-1 and cruzamento_venda and confianca>0.005:
-        salvar_sinal_db(simbolo, "VENDA", ultimo_preco, confianca)
-        ultimo_sinal = "VENDA"
-        return "VENDA", ultimo_preco
+    # Verificação final de confiança/mercado aberto
+    agora = datetime.now()
+    hora_min = agora.hour*60 + agora.minute
+    mercado_aberto = 600 <= hora_min <= 1050
+
+    if mercado_aberto and previsao == 1 and cruzamento_compra and confianca > 0.005:
+        ok = salvar_sinal_db(simbolo, "COMPRA", ultimo_preco, confianca)
+        if ok:
+            ultimo_sinal = "COMPRA"
+            return "COMPRA", ultimo_preco
+    elif mercado_aberto and previsao == -1 and cruzamento_venda and confianca > 0.005:
+        ok = salvar_sinal_db(simbolo, "VENDA", ultimo_preco, confianca)
+        if ok:
+            ultimo_sinal = "VENDA"
+            return "VENDA", ultimo_preco
 
     return None, ultimo_preco
+
+# ----------------------
+# verificar ordens e liberar lock se nenhuma posição
+# ----------------------
+def verificar_ordens_fechadas():
+    try:
+        pos = mt5.positions_get()
+        if pos is None or len(pos) == 0:
+            # se não há posições abertas do robô, libera lock
+            if sinal_bloqueado():
+                liberar_sinal()
+            return True
+        # ainda tem posições -> manter lock
+        return False
+    except Exception as e:
+        logger.debug(f"verificar_ordens_fechadas erro: {e}")
+        return False
