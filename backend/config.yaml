@@ -1,0 +1,19 @@
+# backend/config.yaml
+ativos:
+  - EURUSD
+  - GBPUSD
+  - USDJPY
+
+interval: 5m
+period: 60d
+
+capital_inicial: 100000
+risco_por_trade: 0.01
+
+rsi_entrada: 30
+rsi_saida: 70
+volume_min_ratio: 1.2
+confianca_min: 0.80
+
+sl_percent: 1.0    # 1% de stop loss
+tp_percent: 2.0    # 2% de take profit
