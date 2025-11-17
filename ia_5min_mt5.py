@@ -98,4 +98,12 @@ if st.session_state.ordens:
 
 # chamada periódica para liberar lock se ordens fechadas
 if sinais.sinal_bloqueado():
-    sinais.verificar_ordens_fechadas()
+    fechado = sinais.verificar_ordens_fechadas()
+    if fechado and not sinais.sinal_bloqueado():
+        st.session_state.force_refresh = True
+        st.rerun()
+
+# se o backend liberou o lock, forçar refresh
+if st.session_state.get("force_refresh", False):
+    st.session_state.force_refresh = False
+    st.rerun()
