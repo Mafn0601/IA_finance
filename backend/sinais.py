@@ -71,40 +71,76 @@ def selecionar_simbolo(simbolo: str):
     logger.warning(f"⚠️ Símbolo {simbolo} não encontrado no MT5")
     return False
 
-def executar_ordem(simbolo: str, tipo_ordem: str, preco: float, sl: float, tp: float, volume: float = 1.0, ordem_id: int = 1):
-    try:
-        if not mt5.initialize():
-            logger.error("⚠️ MT5 não inicializado. Ordem não enviada.")
-            return False
+def executar_ordem(symbol, sinal, preco, sl, tp, volume, tp_id):
+    """
+    Envia ordem para o MT5 com segurança:
+    - corrige ask/bid
+    - adiciona deviation
+    - adiciona type_filling obrigatório
+    - ajusta volume corretamente
+    """
 
-        tipo = mt5.ORDER_TYPE_BUY if tipo_ordem.upper() == "COMPRA" else mt5.ORDER_TYPE_SELL
-
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": simbolo,
-            "volume": volume,
-            "type": tipo,
-            "price": preco,
-            "sl": sl,
-            "tp": tp,
-            "deviation": 20,
-            "magic": 123456 + ordem_id,
-            "comment": f"IA_Parcial_{ordem_id}",
-            "type_time": mt5.ORDER_TIME_GTC,
-            "type_filling": mt5.ORDER_FILLING_IOC,
-        }
-
-        result = mt5.order_send(request)
-        if result.retcode != mt5.TRADE_RETCODE_DONE:
-            logger.error(f"❌ Falha ao executar ordem {tipo_ordem} para {simbolo}: {getattr(result, 'comment', 'Sem detalhe')}")
-            return False
-
-        logger.info(f"✅ Ordem {tipo_ordem} executada com sucesso para {simbolo} a {preco}")
-        return True
-
-    except Exception as e:
-        logger.error(f"⚠️ Erro ao executar ordem {tipo_ordem} para {simbolo}: {e}")
+    # --- Seleciona ativo ---
+    if not mt5.symbol_select(symbol, True):
+        print(f"[ERRO] Não foi possível selecionar símbolo: {symbol}")
         return False
+
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        print(f"[ERRO] Info do símbolo não encontrada: {symbol}")
+        return False
+
+    # --- Volume mínimo / step ---
+    if info.volume_min > 0:
+        volume = max(volume, info.volume_min)
+
+    if info.volume_step > 0:
+        volume = round(volume / info.volume_step) * info.volume_step
+
+    # --- Corrigir PREÇO ---
+    # COMPRA usa ASK
+    # VENDA usa BID
+    if sinal == "COMPRA":
+        price = info.ask
+        order_type = mt5.ORDER_TYPE_BUY
+    else:
+        price = info.bid
+        order_type = mt5.ORDER_TYPE_SELL
+
+    # Corrigir SL/TP para decimais
+    sl = round(sl, info.digits)
+    tp = round(tp, info.digits)
+
+    # --- Preencher request ---
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": symbol,
+        "type": order_type,
+        "volume": float(volume),
+        "price": float(price),
+        "sl": float(sl),
+        "tp": float(tp),
+        "magic": 20250125,            # identificador das ordens
+        "deviation": 20,               # margem para evitar rejeição
+        "type_filling": mt5.ORDER_FILLING_FOK,  # obrigatório para B3
+        "type_time": mt5.ORDER_TIME_GTC,
+        "comment": f"TP{tp_id}"
+    }
+
+    # --- Enviar ---
+    result = mt5.order_send(request)
+
+    # --- Verificar retorno ---
+    if result is None:
+        print("[ERRO] MT5 não respondeu.")
+        return False
+
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        print(f"[ERRO] Ordem rejeitada. Retcode={result.retcode}")
+        return False
+
+    print(f"[OK] Ordem enviada: {symbol} | {sinal} | TP{tp_id}")
+    return True
 
 # === INDICADORES ===
 def calculate_rsi(series, period=14):
