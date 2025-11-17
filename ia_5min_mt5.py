@@ -1,156 +1,101 @@
-# ia_5min_mt5.py — DASHBOARD + SAÍDAS PARCIAIS (1.25 / 1.50 / 2.00)
+# ia_5min_mt5.py — STREAMLIT DASHBOARD (usa backend/sinais.py)
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import MetaTrader5 as mt5
 import pandas as pd
-import numpy as np
 import time
 import winsound
-from sqlalchemy import create_engine
-from backend.sinais import initialize_mt5, selecionar_simbolo, gerar_sinal_IA, executar_ordem
+from backend import sinais
 
-# === CONFIGURAÇÃO ===
-st.set_page_config(page_title="IA 5min - SAÍDAS PARCIAIS", layout="wide")
-engine = create_engine('postgresql://postgres:admin12345@localhost:5432/ia_mt5')
-
-if not initialize_mt5():
-    st.error("ERRO: MT5 não conectado. Abra o MT5 e configure uma conta válida.")
-    st.stop()
-
-# === ATIVOS COM SAÍDAS PARCIAIS ===
+# === CONFIG ===
+st.set_page_config(page_title="IA 5min - Saídas Parciais (lock)", layout="wide")
 ATIVOS = {
-    "IBOV": {
-        "symbol": "WINZ25", "nome": "IBOV (via WIN)", "decimais": 0,
-        "ponto": 5, "sl_pontos": 100, "tp_pontos": [125, 150, 200]
-    },
-    "WDO": {
-        "symbol": "WDOX25", "nome": "Mini-Dólar", "decimais": 1,
-        "ponto": 0.05, "sl_pontos": 20, "tp_pontos": [25, 30, 40]
-    },
-    "PETR4": {
-        "symbol": "PETR4", "nome": "Petrobras", "decimais": 2,
-        "ponto": 0.01, "sl_pontos": 50, "tp_pontos": [62.5, 75, 100]
-    }
+    "IBOV": {"symbol": "WINZ25", "nome": "IBOV (via WIN)", "ponto": 5, "decimais": 0, "sl_pontos": 100, "tp_pontos":[125,150,200]},
+    "WDO":  {"symbol": "WDOX25", "nome":"Mini-Dólar", "ponto":0.05, "decimais":1, "sl_pontos":20, "tp_pontos":[25,30,40]},
+    "PETR4":{"symbol":"PETR4", "nome":"Petrobras", "ponto":0.01, "decimais":2, "sl_pontos":50, "tp_pontos":[62.5,75,100]}
 }
 
-# Estado
+# inicializa MT5 (tenta)
+if not sinais.initialize_mt5():
+    st.warning("MT5 não conectado — verifique terminal.")
+    # não st.stop() porque você pode querer usar CSV/hist
+
+# Session state
 if 'ultimo_sinal' not in st.session_state:
     st.session_state.ultimo_sinal = {}
+
 if 'ordens' not in st.session_state:
     st.session_state.ordens = []
 
-# === FUNÇÕES ===
-def tocar_som(tipo="COMPRA"):
-    freq = 1200 if tipo == "COMPRA" else 600
-    try:
-        winsound.Beep(freq, 800)
-    except:
-        pass
+# autorefresh a cada 10s (ajuste ao seu gosto)
+count = st_autorefresh(interval=10_000, key="refresh")
 
-def calcular_sl_tp(preco, sinal, config):
-    ponto = config["ponto"]
-    sl_pontos = config["sl_pontos"]
-    tp_pontos = config["tp_pontos"]
+st.title("IA 5min - Saídas Parciais (lock)")
+st.write(f"Atualização #{count} | {time.strftime('%H:%M:%S')} | Lock: {'ON' if sinais.sinal_bloqueado() else 'OFF'}")
 
-    sl = preco - (sl_pontos * ponto) if sinal == "COMPRA" else preco + (sl_pontos * ponto)
-    sl = round(sl, config["decimais"])
+cols = st.columns(3)
 
-    tps = []
-    for tp_p in tp_pontos:
-        if sinal == "COMPRA":
-            tps.append(round(preco + tp_p * ponto, config["decimais"]))
-        else:
-            tps.append(round(preco - tp_p * ponto, config["decimais"]))
-    return sl, tps
+for i,(k, cfg) in enumerate(ATIVOS.items()):
+    col = cols[i]
+    with col:
+        st.subheader(f"{cfg['nome']} ({cfg['symbol']})")
+        # seleciona símbolo no MT5 (safe)
+        disponível = sinais.selecionar_simbolo(cfg['symbol'])
+        if not disponível:
+            st.warning("Símbolo indisponível no MT5")
+            continue
 
-# === AQUI ESTÁ A ÚNICA PARTE REALMENTE CORRIGIDA ===
-def enviar_ordem_parcial(ativo, sinal, preco, config):
-    sl, tps = calcular_sl_tp(preco, sinal, config)
-
-    # >>> CORREÇÃO MÍNIMA: volume correto para cada ativo <<<
-    volume_parcial = 1.0 if config["decimais"] == 0 else 0.01
-
-    resultados = []
-
-    for i, tp in enumerate(tps, 1):
-        sucesso = executar_ordem(ativo, sinal, preco, sl, tp, volume_parcial, i)
-
-        # >>> CORREÇÃO MÍNIMA: evitar travamento do MT5 <<<
-        time.sleep(1)
-
-        if sucesso:
-            resultados.append(f"TP{i} ({tp}) → OK")
-            st.session_state.ordens.append({
-                'time': time.strftime("%H:%M:%S"),
-                'ativo': config["nome"],
-                'sinal': sinal,
-                'preco': preco,
-                'sl': sl,
-                'tp': tp,
-                'volume': volume_parcial,
-                'status': 'EXECUTADA'
-            })
-        else:
-            resultados.append(f"TP{i} → Erro")
-
-    msg = f"{sinal} {3*volume_parcial:.2f} contratos (3 saídas):\n" + "\n".join(resultados)
-    return all("OK" in r for r in resultados), msg
-
-# === DASHBOARD ===
-st.title("IA 5min - SAÍDAS PARCIAIS (1.25 / 1.50 / 2.00)")
-st.markdown("**1 Clique → 3 Ordens com TP em 1.25x, 1.50x, 2.00x**")
-
-count = st_autorefresh(interval=5000, key="refresh")
-hora = time.strftime("%H:%M")
-aberto = 9 <= int(hora[:2]) <= 18
-st.write(f"**Atualização #{count}** | {hora} | Mercado: **{'ABERTO' if aberto else 'FECHADO'}**")
-
-col1, col2, col3 = st.columns(3)
-
-for ativo, config in ATIVOS.items():
-    if not selecionar_simbolo(config["symbol"]):
-        with (col1 if ativo == "IBOV" else col2 if ativo == "WDO" else col3):
-            st.warning(f"{config['nome']} indisponível")
-        continue
-
-    sinal, preco = gerar_sinal_IA(config["symbol"], mt5.TIMEFRAME_M5)
-    preco = round(preco, config["decimais"]) if preco else 0
-
-    if sinal and sinal != st.session_state.ultimo_sinal.get(ativo):
-        st.session_state.ultimo_sinal[ativo] = sinal
-        st.balloons()
-        tocar_som(sinal)
-
-    with (col1 if ativo == "IBOV" else col2 if ativo == "WDO" else col3):
-        st.subheader(f"{config['nome']} ({config['symbol']})")
-
-        if ativo == "IBOV":
-            st.metric("WIN", f"{preco:,}")
-            st.metric("IBOV", f"{(preco*5):,} pts")
-        else:
-            st.metric("Preço", f"{preco}")
+        sinal, preco = sinais.gerar_sinal_IA(cfg['symbol'], mt5.TIMEFRAME_M5)
+        preco_display = round(preco, cfg['decimais']) if preco else None
 
         if sinal:
-            cor = "green" if sinal == "COMPRA" else "red"
-            st.markdown(f"<h2 style='color:{cor};'>→ {sinal}</h2>", unsafe_allow_html=True)
-
-            sl, tps = calcular_sl_tp(preco, sinal, config)
-            st.caption(f"SL: {sl} | TP1: {tps[0]} | TP2: {tps[1]} | TP3: {tps[2]}")
-
-            if st.button(f"EXECUTAR {sinal} (3 SAÍDAS)", key=f"btn_{ativo}", type="primary"):
-                sucesso, msg = enviar_ordem_parcial(config["symbol"], sinal, preco, config)
-                if sucesso:
-                    st.success(msg)
+            color = "green" if sinal == "COMPRA" else "red"
+            st.markdown(f"<h2 style='color:{color};'>→ {sinal} @ {preco_display}</h2>", unsafe_allow_html=True)
+            st.caption(f"SL: {cfg['sl_pontos']} pts | TPs: {cfg['tp_pontos']}")
+            if st.button(f"EXECUTAR {sinal} (3 SAÍDAS) - {cfg['symbol']}", key=f"btn_{cfg['symbol']}"):
+                # prepara sl/tps
+                ponto = cfg['ponto']
+                sl = preco - cfg['sl_pontos'] * ponto if sinal == "COMPRA" else preco + cfg['sl_pontos'] * ponto
+                tps = []
+                for tp_mul in cfg['tp_pontos']:
+                    if sinal == "COMPRA":
+                        tps.append(preco + tp_mul * ponto)
+                    else:
+                        tps.append(preco - tp_mul * ponto)
+                # envia TPs parciais (volume 1 por TP)
+                resultados = []
+                sucesso_total = True
+                for idx,tp in enumerate(tps, start=1):
+                    ok = sinais.executar_ordem(cfg['symbol'], sinal, preco, sl, tp, 1.0, idx)
+                    resultados.append(f"TP{idx} ({round(tp,cfg['decimais'])}) → {'OK' if ok else 'Erro'}")
+                    if not ok:
+                        sucesso_total = False
+                # gravar estado local de ordens para exibição
+                st.session_state.ordens.append({
+                    "time": time.strftime("%H:%M:%S"),
+                    "ativo": cfg['symbol'],
+                    "sinal": sinal,
+                    "preco": round(preco_display, cfg['decimais']) if preco_display else preco_display,
+                    "resultados": resultados
+                })
+                # bloquear sinais (já feito internamente por salvar_sinal_db quando gerou)
+                # tocar som
+                try:
+                    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                except Exception:
+                    pass
+                if sucesso_total:
+                    st.success("\n".join(resultados))
                 else:
-                    st.error(msg)
+                    st.error("\n".join(resultados))
         else:
             st.info("Aguardando sinal...")
 
-# === ORDENS EXECUTADAS ===
+# exibir ordens realizadas
 if st.session_state.ordens:
-    st.subheader("Ordens com Saídas Parciais")
-    df_ordens = pd.DataFrame(st.session_state.ordens)
-    st.dataframe(df_ordens, use_container_width=True)
+    st.subheader("Ordens recentes")
+    st.dataframe(pd.DataFrame(st.session_state.ordens).iloc[::-1], use_container_width=True)
 
-st.markdown("---")
-st.caption("IA 5min Elite | Saídas em 1.25x / 1.50x / 2.00x | R:R Otimizado")
+# chamada periódica para liberar lock se ordens fechadas
+if sinais.sinal_bloqueado():
+    sinais.verificar_ordens_fechadas()
