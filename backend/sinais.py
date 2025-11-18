@@ -1,4 +1,4 @@
-# backend/sinais.py — IA 5min + NOTÍCIAS + ORDENS + JSON + LOCK
+# backend/sinais.py — atualizado para carregar modelos por ativo (CSV-trained)
 import MetaTrader5 as mt5
 import pandas as pd
 import numpy as np
@@ -12,6 +12,7 @@ import filelock
 import time
 import json
 from pathlib import Path
+import joblib
 
 # === CONFIG / PATHS ===
 log_dir = 'C:\\temp'
@@ -19,16 +20,18 @@ os.makedirs(log_dir, exist_ok=True)
 LOCK_PATH = os.path.join(log_dir, "sinal_lock.txt")
 SINAIS_CSV = os.path.join(log_dir, "sinais_ao_vivo.csv")
 ARQUIVO_RESULTADOS = Path("C:/Users/Marco/ia_finance/resultados.json")
+MODELS_DIR = Path(__file__).resolve().parent / "modelos"
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 # === LOG ===
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('IA_MT5')
 handler = logging.FileHandler(os.path.join(log_dir, 'ia_mt5.log'), encoding='utf-8')
 handler.setFormatter(logging.Formatter('%(asctime)s | %(levelname)s | %(message)s'))
+# avoid duplicate handlers if reloaded
 if not logger.handlers:
     logger.addHandler(handler)
 else:
-    # avoid duplicate handlers in reloads
     logger.handlers = [handler]
 
 # === GLOBALS ===
@@ -37,7 +40,8 @@ cache_local = {}
 ultima_verificacao_noticias = None
 cache_noticias = 0.0
 historico_dados = {}
-modelo = SGDClassifier(loss='log_loss', learning_rate='adaptive', eta0=0.01, random_state=42)
+# modelo default para incremental (mantive, mas não mais usado para treino contínuo)
+modelo_incremental = SGDClassifier(loss='log_loss', learning_rate='adaptive', eta0=0.01, random_state=42)
 melhores_params = {}
 
 # ----------------------
@@ -82,6 +86,29 @@ def carregar_melhores_parametros_json(ativo):
         return {}
     melhor = max(resultados_ativo, key=lambda x: x.get('lucro', -1))
     return melhor.get('params', {})
+
+# ----------------------
+# MODEL IO
+# ----------------------
+def model_path_for(symbol):
+    return MODELS_DIR / f"{symbol}.pkl"
+
+def carregar_modelo_IA(simbolo):
+    """
+    Carrega o modelo .pkl gerado pelo script de treino.
+    Retorna o modelo (scikit-learn) ou None.
+    """
+    try:
+        p = model_path_for(simbolo)
+        if not p.exists():
+            logger.info(f"Modelo não encontrado para {simbolo}: {p}")
+            return None
+        model = joblib.load(p)
+        logger.info(f"Modelo carregado: {p}")
+        return model
+    except Exception as e:
+        logger.error(f"Erro carregar_modelo_IA({simbolo}): {e}")
+        return None
 
 # ----------------------
 # MT5 helpers
@@ -172,12 +199,10 @@ def executar_ordem(symbol, sinal, preco, sl, tp, volume, tp_id):
             logger.error(f"executar_ordem: MT5 retornou None para {symbol}")
             return False
 
-        # log retcode & comment
         logger.info(f"executar_ordem result: symbol={symbol} retcode={getattr(result,'retcode',None)} comment={getattr(result,'comment','')}")
         if hasattr(mt5, "TRADE_RETCODE_DONE") and getattr(result, "retcode", None) == mt5.TRADE_RETCODE_DONE:
             return True
 
-        # não ok
         logger.warning(f"executar_ordem rejeitada: retcode={getattr(result,'retcode',None)} comment={getattr(result,'comment','')}")
         return False
     except Exception as e:
@@ -185,7 +210,7 @@ def executar_ordem(symbol, sinal, preco, sl, tp, volume, tp_id):
         return False
 
 # ----------------------
-# Indicadores / IA
+# Indicadores / IA helpers
 # ----------------------
 def calculate_ema(data, period):
     if len(data) < period:
@@ -214,24 +239,29 @@ def calculate_bollinger(series, window=20, stds=2):
     std = series.rolling(window).std()
     return sma.iloc[-1] + (stds*std.iloc[-1]), sma.iloc[-1], sma.iloc[-1] - (stds*std.iloc[-1])
 
-def treinar_modelo_IA(dados, simbolo):
-    global historico_dados, modelo
-    if simbolo not in historico_dados:
-        historico_dados[simbolo] = pd.DataFrame(columns=['ema_curta','ema_longa','volatilidade','rsi','macd','bb_position','sinal'])
-    dados = dados.dropna()
-    if dados.empty:
-        return None
-    historico_dados[simbolo] = pd.concat([historico_dados[simbolo], dados], ignore_index=True)
-    X = historico_dados[simbolo][['ema_curta','ema_longa','volatilidade','rsi','macd','bb_position']].values
-    y = historico_dados[simbolo]['sinal'].values
-    if len(X) < 2 or np.any(np.isnan(X)):
-        return None
-    try:
-        modelo.partial_fit(X, y, classes=[-1,0,1])
-    except Exception as e:
-        logger.debug(f"treinar_modelo_IA partial_fit erro: {e}")
-        return None
-    return modelo
+def add_basic_indicators_df(df):
+    df = df.copy().sort_values("datetime").reset_index(drop=True)
+    close = df["close"].astype(float)
+    df["ema8"] = close.ewm(span=8, adjust=False).mean()
+    df["ema21"] = close.ewm(span=21, adjust=False).mean()
+    df["ema50"] = close.ewm(span=50, adjust=False).mean()
+    delta = close.diff()
+    gain = delta.clip(lower=0).rolling(14).mean()
+    loss = -delta.clip(upper=0).rolling(14).mean()
+    rs = gain / (loss + 1e-9)
+    df["rsi14"] = 100 - (100 / (1 + rs))
+    df["macd"] = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
+    df["macd_signal"] = df["macd"].ewm(span=9, adjust=False).mean()
+    tr = pd.concat([(df['high'] - df['low']).abs(), (df['high'] - df['close'].shift()).abs(), (df['low'] - df['close'].shift()).abs()], axis=1).max(axis=1)
+    df["atr"] = tr.rolling(14).mean()
+    df["ret"] = close.pct_change()
+    df["vol20"] = df["ret"].rolling(20).std()
+    low14 = df["low"].rolling(14).min()
+    high14 = df["high"].rolling(14).max()
+    df["stoch_k"] = 100 * (close - low14) / (high14 - low14 + 1e-9)
+    df["stoch_d"] = df["stoch_k"].rolling(3).mean()
+    df = df.dropna().reset_index(drop=True)
+    return df
 
 # ----------------------
 # Cache / CSV
@@ -320,7 +350,7 @@ def analisar_noticias():
     return cache_noticias
 
 # ----------------------
-# gerar_sinal_IA (com lock check)
+# gerar_sinal_IA (com modelo por ativo)
 # ----------------------
 def gerar_sinal_IA(simbolo, timeframe, lookback=200):
     global ultimo_sinal, melhores_params
@@ -338,16 +368,8 @@ def gerar_sinal_IA(simbolo, timeframe, lookback=200):
     except Exception as e:
         logger.debug(f"erro carregar params json: {e}")
 
-    params = {
-        "ema_curta": melhores_params.get("ema_curta", 9),
-        "ema_longa": melhores_params.get("ema_longa", 21),
-        "rsi_period": melhores_params.get("rsi_period", 14),
-        "macd_fast": melhores_params.get("macd_fast", 8),
-        "macd_slow": melhores_params.get("macd_slow", 17),
-        "macd_signal": melhores_params.get("macd_signal", 9),
-        "bb_window": melhores_params.get("bb_window", 20),
-        "bb_std": melhores_params.get("bb_std", 2)
-    }
+    # carrega modelo salvo (um por ativo)
+    modelo = carregar_modelo_IA(simbolo)
 
     try:
         rates = mt5.copy_rates_from_pos(simbolo, timeframe, 0, lookback)
@@ -359,73 +381,100 @@ def gerar_sinal_IA(simbolo, timeframe, lookback=200):
         return None, None
 
     df = pd.DataFrame(rates)
-    df['close'] = df['close'].astype(float)
-    df['retorno'] = (df['close'] - df['close'].shift(1)) / (df['close'].shift(1) + 1e-9)
+    # converter time unix -> datetime
+    if 'time' in df.columns:
+        df['datetime'] = pd.to_datetime(df['time'], unit='s')
+    elif 'datetime' in df.columns:
+        df['datetime'] = pd.to_datetime(df['datetime'])
+    else:
+        # fallback
+        df['datetime'] = pd.to_datetime(df.index, unit='s', errors='coerce')
 
-    ema_curta_atual, ema_curta_anterior = calculate_ema(df['retorno'].dropna(), params["ema_curta"])
-    ema_longa_atual, ema_longa_anterior = calculate_ema(df['retorno'].dropna(), params["ema_longa"])
-    if ema_curta_atual is None or ema_longa_atual is None:
-        return None, df['close'].iloc[-1]
+    # garantir colunas
+    for c in ['open','high','low','close']:
+        if c not in df.columns:
+            logger.error("coluna faltando em rates: " + c)
+            return None, None
+    df = df[['datetime','open','high','low','close']].copy()
+    df = add_basic_indicators_df(df)
+    if df is None or len(df) < 10:
+        return None, None
 
-    rsi = calculate_rsi(df['close'], params["rsi_period"])
-    macd, signal_line = calculate_macd(df['close'], params["macd_fast"], params["macd_slow"], params["macd_signal"])
-    upper, sma, lower = calculate_bollinger(df['close'], params["bb_window"], params["bb_std"])
-    bb_position = (df['close'].iloc[-1] - sma) / (upper - lower) if (upper - lower) != 0 else 0
+    # extrair features coerentes com treino
+    feat_cols = ["ema8","ema21","ema50","rsi14","macd","macd_signal","bb_width","vol20","stoch_k","stoch_d"]
+    if not all(c in df.columns for c in feat_cols):
+        # recalcula caso
+        df = add_basic_indicators_df(df)
 
-    cruzamento_compra = (ema_curta_atual > ema_longa_atual) and (ema_curta_anterior <= ema_longa_anterior)
-    cruzamento_venda = (ema_curta_atual < ema_longa_atual) and (ema_curta_anterior >= ema_longa_anterior)
+    latest = df.iloc[-1]
+    X = np.array([latest[c] for c in feat_cols], dtype=float).reshape(1, -1)
 
-    volatilidade = df['retorno'].tail(20).std()
-    ultimo_preco = df['close'].iloc[-1]
+    # confiança / prob thresholds
+    prob_thresh = 0.55
 
-    dados_treino = pd.DataFrame({
-        'ema_curta':[ema_curta_atual],
-        'ema_longa':[ema_longa_atual],
-        'volatilidade':[volatilidade],
-        'rsi':[rsi],
-        'macd':[macd],
-        'bb_position':[bb_position],
-        'sinal':[1 if cruzamento_compra else -1 if cruzamento_venda else 0]
-    })
+    previsao = None
+    confianca = 0.0
+    if modelo is not None:
+        try:
+            probs = modelo.predict_proba(X)[0]
+            # classes order depends on model.classes_
+            classes = list(modelo.classes_)
+            # choose max prob
+            idx_max = int(np.argmax(probs))
+            class_pred = classes[idx_max]
+            confianca = float(probs[idx_max])
+            logger.debug(f"modelo predict {class_pred} prob={confianca:.3f}")
+            if confianca >= prob_thresh:
+                previsao = int(class_pred)
+            else:
+                previsao = 0  # inconclusivo
+        except Exception as e:
+            logger.error(f"Erro predict modelo {simbolo}: {e}")
+            previsao = 0
+    else:
+        # fallback por cruzamentos + heurística
+        cruz_comp = (latest["ema8"] > latest["ema21"] and df["ema8"].iloc[-2] <= df["ema21"].iloc[-2])
+        cruz_vend = (latest["ema8"] < latest["ema21"] and df["ema8"].iloc[-2] >= df["ema21"].iloc[-2])
+        if cruz_comp:
+            previsao = 1
+            confianca = abs(latest["ema8"] - latest["ema21"]) / (abs(latest["ema21"]) + 1e-9)
+        elif cruz_vend:
+            previsao = -1
+            confianca = abs(latest["ema8"] - latest["ema21"]) / (abs(latest["ema21"]) + 1e-9)
+        else:
+            previsao = 0
+            confianca = 0.0
 
-    modelo_local = treinar_modelo_IA(dados_treino, simbolo)
-    confianca = abs(ema_curta_atual - ema_longa_atual)/ (ema_longa_atual + 1e-9)
+    # transformar previsao para sinal textual
+    sinal = None
+    if previsao == 1:
+        sinal = "COMPRA"
+    elif previsao == -1:
+        sinal = "VENDA"
+    else:
+        sinal = None
 
+    # bloqueios/evitar repetição
+    if (ultimo_sinal == "COMPRA" and sinal == "COMPRA") or (ultimo_sinal == "VENDA" and sinal == "VENDA"):
+        return None, float(df['close'].iloc[-1])
+
+    # notícias
     risco_noticias = analisar_noticias()
     if risco_noticias > 0.5:
         logger.warning(f"Bloqueio por notícias ({risco_noticias:.2f})")
-        return None, ultimo_preco
+        return None, float(df['close'].iloc[-1])
 
-    if modelo_local is not None:
-        try:
-            previsao = modelo_local.predict([[ema_curta_atual, ema_longa_atual, volatilidade, rsi, macd, bb_position]])[0]
-        except Exception as e:
-            logger.debug(f"predict error: {e}")
-            previsao = 1 if cruzamento_compra else -1 if cruzamento_venda else 0
-    else:
-        previsao = 1 if cruzamento_compra else -1 if cruzamento_venda else 0
-
-    # evita repetição imediata
-    if ultimo_sinal == "COMPRA" and previsao == 1:
-        return None, ultimo_preco
-    if ultimo_sinal == "VENDA" and previsao == -1:
-        return None, ultimo_preco
-
-    # Verificação final de confiança/mercado aberto
+    # só envia se mercado aberto (configurable)
     agora = datetime.now()
     hora_min = agora.hour*60 + agora.minute
     mercado_aberto = 600 <= hora_min <= 1050
 
-    if mercado_aberto and previsao == 1 and cruzamento_compra and confianca > 0.005:
-        ok = salvar_sinal_db(simbolo, "COMPRA", ultimo_preco, confianca)
+    ultimo_preco = float(df['close'].iloc[-1])
+    if mercado_aberto and sinal is not None and confianca > 0.005:
+        ok = salvar_sinal_db(simbolo, sinal, ultimo_preco, confianca)
         if ok:
-            ultimo_sinal = "COMPRA"
-            return "COMPRA", ultimo_preco
-    elif mercado_aberto and previsao == -1 and cruzamento_venda and confianca > 0.005:
-        ok = salvar_sinal_db(simbolo, "VENDA", ultimo_preco, confianca)
-        if ok:
-            ultimo_sinal = "VENDA"
-            return "VENDA", ultimo_preco
+            ultimo_sinal = sinal
+            return sinal, ultimo_preco
 
     return None, ultimo_preco
 
