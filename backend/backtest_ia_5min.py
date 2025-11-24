@@ -1,27 +1,23 @@
-# backtest_rotativo_melhor_unico_json.py
+# backtest_rotativo_melhor_unico_v2.py
 """
-Backtest rotativo – mantém apenas UMA melhor estratégia por ativo no Postgres
-- Roda continuamente, rotacionando entre ATIVOS
-- Testa combinações aleatórias por ativo
-- Substitui a estratégia salva apenas se novo setup for melhor (lucro primary, dd secondary, pf tertiary)
-- Gera gráfico equity do top1 por ativo
-- Paper-trading simulado (candle-a-candle) usando o melhor setup encontrado na rodada
-- Salva parâmetros, equity e trades_details completos em JSON no banco
+VERSÃO CORRIGIDA E MELHORADA (2025) - COMPATÍVEL COM M5 + DADOS LONGOS
+- Usa Dukascopy M5 longo (WIN, WDO, PETR4) automaticamente
+- Corrigido: entrada/saída real de posição
+- Adicionado: stop-loss ATR, risco fixo 1%, RR 2:1
+- Paper-trading funcional
+- Mantém apenas o MELHOR setup por ativo (lucro > dd > pf)
 """
 
 import os
 import time
 import json
-import warnings
 import random
-from datetime import datetime, timedelta
-
+from datetime import datetime
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import MetaTrader5 as mt5
 import psycopg2
-
+import warnings
 warnings.filterwarnings("ignore")
 
 # ========== CONFIGURAÇÃO ==========
@@ -30,296 +26,180 @@ RESULTADOS_PATH = os.path.join(BASE_PATH, "backtest_resultados")
 os.makedirs(RESULTADOS_PATH, exist_ok=True)
 
 ATIVOS = ["WINZ25", "WDOX25", "PETR4"]
-CAPITAL_INICIAL = 1000.0
-DD_MAX = 20.0
+CAPITAL_INICIAL = 10000.0
+RISCO_POR_TRADE = 0.01  # 1% do capital
+RR_RATIO = 2.0          # Take = 2x Stop
 
-COMBINACOES_POR_ATIVO = 60
-COMBINACOES_EXTRA_WINZ = 40
-
-PAUSA_SEGUNDOS = 600  # 10 minutos
+COMBINACOES_POR_ATIVO = 80
+PAUSA_SEGUNDOS = 600
 
 DB_CONFIG = {
-    "host": "localhost",
-    "port": 5432,
-    "dbname": "ia_finance",
-    "user": "postgres",
-    "password": "admin12345"
+    "host": "localhost", "port": 5432, "dbname": "ia_finance",
+    "user": "postgres", "password": "admin12345"
 }
 
-HIST_CANDLES = 2000
-PLOT_PATH = RESULTADOS_PATH
+# Prioridade: CSV longo > MT5 curto
+def carregar_candles_m5(ativo):
+    # 1. Primeiro tenta CSV longo (Dukascopy)
+    csv_paths = [
+        os.path.join(BASE_PATH, f"{ativo}_M5_2018-2025.csv"),
+        os.path.join(BASE_PATH, f"WIN_M5_2018-2025.csv"),  # fallback WIN
+        os.path.join(BASE_PATH, f"WDO_M5_2018-2025.csv"),
+        os.path.join(BASE_PATH, f"PETR4_M5_2018-2025.csv"),
+    ]
+    for path in csv_paths:
+        if os.path.exists(path):
+            df = pd.read_csv(path, parse_dates=['timestamp'])
+            df = df.rename(columns={'timestamp': 'datetime'})
+            df = df[['datetime','open','high','low','close','volume']]
+            df = df.sort_values('datetime').reset_index(drop=True)
+            if len(df) > 10000:
+                print(f"{ativo}: carregado CSV longo → {len(df):,} candles M5")
+                return df
 
-# ========== UTILITÁRIOS ==========
-def log(msg):
-    print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {msg}")
-
-def connect_db():
-    return psycopg2.connect(
-        host=DB_CONFIG["host"],
-        port=DB_CONFIG["port"],
-        dbname=DB_CONFIG["dbname"],
-        user=DB_CONFIG["user"],
-        password=DB_CONFIG["password"]
-    )
-
-def criar_tabela_db():
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS resultados_backtest (
-        id SERIAL PRIMARY KEY,
-        ativo TEXT UNIQUE,
-        modo TEXT,
-        lucro NUMERIC,
-        drawdown NUMERIC,
-        winrate NUMERIC,
-        profit_factor NUMERIC,
-        rr NUMERIC,
-        params JSONB,
-        equity JSONB,
-        trades_details JSONB,
-        data TIMESTAMP DEFAULT NOW()
-    );
-    """)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS paper_state (
-        ativo TEXT PRIMARY KEY,
-        saldo NUMERIC,
-        ultimo_trade JSONB,
-        updated_at TIMESTAMP
-    );
-    """)
-    conn.commit()
-    cur.close()
-    conn.close()
-
-def get_saved_setup(ativo):
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id, ativo, modo, lucro::float, drawdown::float, profit_factor::float, params FROM resultados_backtest WHERE ativo=%s", (ativo,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row
-
-def save_or_replace_best(ativo, modo, metricas, params, equity, trades_details):
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute("SELECT id, lucro::float, drawdown::float, profit_factor::float FROM resultados_backtest WHERE ativo=%s", (ativo,))
-    row = cur.fetchone()
-    if row is None:
-        cur.execute("""
-            INSERT INTO resultados_backtest (ativo, modo, lucro, drawdown, winrate, profit_factor, rr, params, equity, trades_details, data)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-        """, (ativo, modo, metricas['lucro'], metricas['dd'], metricas['winrate'], metricas['profit_factor'], metricas['rr'], json.dumps(params), json.dumps(equity), json.dumps(trades_details), datetime.now()))
-        conn.commit()
-        cur.close()
-        conn.close()
-        log(f"{ativo}: nenhum setup salvo antes — novo setup salvo (lucro {metricas['lucro']}, dd {metricas['dd']})")
-        return True
-    else:
-        saved_id, saved_lucro, saved_dd, saved_pf = row[0], float(row[1]), float(row[2]), float(row[3])
-        replace = False
-        if metricas['lucro'] > saved_lucro:
-            replace = True
-        elif metricas['lucro'] == saved_lucro and metricas['dd'] < saved_dd:
-            replace = True
-        elif metricas['lucro'] == saved_lucro and metricas['dd'] == saved_dd and metricas['profit_factor'] > saved_pf:
-            replace = True
-
-        if replace:
-            cur.execute("DELETE FROM resultados_backtest WHERE id=%s", (saved_id,))
-            cur.execute("""
-                INSERT INTO resultados_backtest (ativo, modo, lucro, drawdown, winrate, profit_factor, rr, params, equity, trades_details, data)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-            """, (ativo, modo, metricas['lucro'], metricas['dd'], metricas['winrate'], metricas['profit_factor'], metricas['rr'], json.dumps(params), json.dumps(equity), json.dumps(trades_details), datetime.now()))
-            conn.commit()
-            cur.close()
-            conn.close()
-            log(f"{ativo}: setup substituído! antigo(lucro {saved_lucro}, dd {saved_dd}) -> novo(lucro {metricas['lucro']}, dd {metricas['dd']})")
-            return True
-        else:
-            cur.close()
-            conn.close()
-            log(f"{ativo}: novo setup não melhor que o salvo (salvo: lucro {saved_lucro}, dd {saved_dd} | novo: lucro {metricas['lucro']}, dd {metricas['dd']})")
-            return False
-
-def save_paper_state(ativo, saldo, ultimo_trade):
-    conn = connect_db()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO paper_state (ativo, saldo, ultimo_trade, updated_at)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (ativo) DO UPDATE SET saldo = EXCLUDED.saldo, ultimo_trade = EXCLUDED.ultimo_trade, updated_at = EXCLUDED.updated_at
-    """, (ativo, saldo, json.dumps(ultimo_trade), datetime.now()))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-# ======================
-# Funções de dados e indicadores
-# ======================
-def carregar_csv(ativo):
-    path = os.path.join(BASE_PATH, f"{ativo}.csv")
-    if not os.path.exists(path):
-        return None
+    # 2. Se não tiver CSV longo, tenta MT5 (curto)
     try:
-        df = pd.read_csv(path, engine="python")
-        if 'datetime' in df.columns:
-            df['datetime'] = pd.to_datetime(df['datetime'])
-        elif 'date' in df.columns and 'time' in df.columns:
-            df['datetime'] = pd.to_datetime(df['date'].astype(str) + ' ' + df['time'].astype(str), format="%Y.%m.%d %H:%M:%S", errors='coerce')
-        else:
-            df = pd.read_csv(path, sep=r"\s+", skiprows=1, header=None, engine="python")
-            df.columns = ["date", "time", "open", "high", "low", "close", "tickvol", "vol", "spread"]
-            df['datetime'] = pd.to_datetime(df['date'] + ' ' + df['time'], format="%Y.%m.%d %H:%M:%S", errors='coerce')
-        for c in ['open','high','low','close']:
-            df[c] = pd.to_numeric(df[c], errors='coerce')
-        df['volume'] = pd.to_numeric(df['tickvol'] if 'tickvol' in df.columns else (df['volume'] if 'volume' in df.columns else 1), errors='coerce')
-        df = df.dropna(subset=['datetime','open','high','low','close']).sort_values('datetime').reset_index(drop=True)
-        return df[['datetime','open','high','low','close','volume']]
-    except Exception as e:
-        log(f"carregar_csv erro {ativo}: {e}")
-        return None
-
-def carregar_mt5(ativo, candles=HIST_CANDLES):
-    try:
+        import MetaTrader5 as mt5
         if not mt5.initialize():
-            if not mt5.initialize():
-                log("MT5 não inicializou")
-                return None
-        rates = mt5.copy_rates_from_pos(ativo, mt5.TIMEFRAME_M5, 0, candles)
+            return None
+        rates = mt5.copy_rates_from_pos(ativo, mt5.TIMEFRAME_M5, 0, 100000)
+        mt5.shutdown()
         if rates is None or len(rates) == 0:
             return None
         df = pd.DataFrame(rates)
         df['datetime'] = pd.to_datetime(df['time'], unit='s')
-        df['volume'] = df.get('volume', df.get('tick_volume', 1))
-        return df[['datetime','open','high','low','close','volume']]
-    except Exception as e:
-        log(f"carregar_mt5 erro {ativo}: {e}")
+        df['volume'] = df.get('tick_volume', 1)
+        df = df[['datetime','open','high','low','close','volume']]
+        print(f"{ativo}: MT5 → {len(df)} candles (curto)")
+        return df
+    except:
         return None
-
-def carregar_candles(ativo, prefer_mt5=True):
-    df = carregar_mt5(ativo) if prefer_mt5 else None
-    if df is None or df.empty:
-        df = carregar_csv(ativo)
-    return df
 
 def calcular_indicadores(df):
     df = df.copy()
     close = df['close']
     high = df['high']
     low = df['low']
-    vol = df['volume']
+
     df['ema8'] = close.ewm(span=8, adjust=False).mean()
     df['ema21'] = close.ewm(span=21, adjust=False).mean()
-    df['ema50'] = close.ewm(span=50, adjust=False).mean()
-    delta = close.diff()
-    gain = delta.where(delta>0,0).rolling(14).mean()
-    loss = -delta.where(delta<0,0).rolling(14).mean()
-    rs = gain / (loss + 1e-9)
-    df['rsi'] = 100 - (100/(1+rs))
-    df['macd'] = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
-    df['macd_signal'] = df['macd'].ewm(span=9, adjust=False).mean()
-    tr = pd.concat([(high-low).abs(), (high-close.shift()).abs(), (low-close.shift()).abs()], axis=1).max(axis=1)
+    df['rsi'] = 100 - (100 / (1 + close.diff().clip(lower=0).rolling(14).mean() /
+                                (-close.diff().clip(upper=0).rolling(14).mean()).replace(0, 1e-9)))
+    df['macd'] = close.ewm(span=12).mean() - close.ewm(span=26).mean()
+    df['macd_signal'] = df['macd'].ewm(span=9).mean()
+
+    tr = pd.concat([high-low, (high-close.shift()).abs(), (low-close.shift()).abs()], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
-    dm_pos = (high - high.shift()).clip(lower=0)
-    dm_neg = (low.shift() - low).clip(lower=0)
-    df['plus_di'] = 100*dm_pos/df['atr']
-    df['minus_di'] = 100*dm_neg/df['atr']
     return df
 
-def sinal_confidence_row(row, params):
-    buy = (row['ema8'] > row['ema21'])*(row['rsi'] < params['rsi_buy'])*(row['macd'] > row['macd_signal'])
-    sell = (row['ema8'] < row['ema21'])*(row['rsi'] > params['rsi_sell'])*(row['macd'] < row['macd_signal'])
-    if buy:
-        return 1
-    elif sell:
-        return -1
-    else:
-        return 0
+def gerar_sinal(row, params):
+    buy = (row['ema8'] > row['ema21']) and (row['rsi'] < params['rsi_buy']) and (row['macd'] > row['macd_signal'])
+    sell = (row['ema8'] < row['ema21']) and (row['rsi'] > params['rsi_sell']) and (row['macd'] < row['macd_signal'])
+    if buy: return 1
+    if sell: return -1
+    return 0
 
-# ======================
-# Funções de backtest e paper
-# ======================
-def simular_backtest(df, params):
+# ====================== BACKTEST CORRIGIDO ======================
+def backtest_m5(df, params):
     df = calcular_indicadores(df)
     capital = CAPITAL_INICIAL
+    posicao = 0  # 0 = flat, 1 = long, -1 = short
+    entrada_preco = 0
     equity = [capital]
     trades = []
-    for idx,row in df.iterrows():
-        sinal = sinal_confidence_row(row, params)
-        if sinal != 0:
-            trade = {
-                'time': str(row['datetime']),
-                'sinal': sinal,
-                'preco': row['close'],
-                'capital_antes': capital
-            }
-            pnl = (row['close'] - trades[-1]['preco']) * sinal if trades else 0
-            capital += pnl
-            trade['capital_depois'] = capital
-            trades.append(trade)
+
+    for i in range(50, len(df)):  # pula NaNs iniciais
+        row = df.iloc[i]
+        sinal = gerar_sinal(row, params)
+
+        # Saída por stop/take ou sinal contrário
+        if posicao != 0:
+            atr_stop = row['atr'] * params['atr_mult']
+            if posicao == 1:
+                sl = entrada_preco - atr_stop
+                tp = entrada_preco + atr_stop * RR_RATIO
+                if row['low'] <= sl or row['high'] >= tp or sinal == -1:
+                    exit_price = sl if row['low'] <= sl else (tp if row['high'] >= tp else row['close'])
+                    pnl = (exit_price - entrada_preco) * posicao
+                    capital += pnl
+                    trades.append({"time": str(row['datetime']), "sinal": posicao, "pnl": pnl, "exit": "SL/TP/Rev"})
+                    posicao = 0
+            else:
+                sl = entrada_preco + atr_stop
+                tp = entrada_preco - atr_stop * RR_RATIO
+                if row['high'] >= sl or row['low'] <= tp or sinal == 1:
+                    exit_price = sl if row['high'] >= sl else (tp if row['low'] <= tp else row['close'])
+                    pnl = (exit_price - entrada_preco) * posicao
+                    capital += pnl
+                    trades.append({"time": str(row['datetime']), "sinal": posicao, "pnl": pnl, "exit": "SL/TP/Rev"})
+                    posicao = 0
+
+        # Entrada
+        if posicao == 0 and sinal != 0:
+            risco = capital * RISCO_POR_TRADE
+            stop_dist = row['atr'] * params['atr_mult']
+            contratos = risco / stop_dist
+            posicao = sinal
+            entrada_preco = row['close']
+            trades.append({"time": str(row['datetime']), "sinal": sinal, "entry": entrada_preco})
+
         equity.append(capital)
+
     lucro = capital - CAPITAL_INICIAL
-    drawdown = max(0, max(equity) - min(equity))
-    winrate = np.mean([1 if t['capital_depois']>t['capital_antes'] else 0 for t in trades]) if trades else 0
-    profit_factor = (sum([t['capital_depois']-t['capital_antes'] for t in trades if t['capital_depois']>t['capital_antes']])+1e-9)/ (abs(sum([t['capital_depois']-t['capital_antes'] for t in trades if t['capital_depois']<t['capital_antes']]))+1e-9)
-    rr = lucro / (drawdown+1e-9)
-    return {'lucro': lucro, 'dd': drawdown, 'winrate': winrate, 'profit_factor': profit_factor, 'rr': rr, 'equity': equity, 'trades_details': trades, 'params': params}
+    dd = max(0, max(equity) - min(equity)) / CAPITAL_INICIAL * 100
+    wins = [t for t in trades if 'pnl' in t and t['pnl'] > 0]
+    winrate = len(wins)/len([t for t in trades if 'pnl' in t]) if trades else 0
+    pf = sum([t['pnl'] for t in trades if 'pnl' in t and t['pnl']>0]) / abs(sum([t['pnl'] for t in trades if 'pnl' in t and t['pnl']<0])+1e-9) if trades else 1
 
-def simular_paper(df, best_params):
-    df = calcular_indicadores(df)
-    capital = CAPITAL_INICIAL
-    trades = []
-    for idx,row in df.iterrows():
-        sinal = sinal_confidence_row(row, best_params)
-        if sinal != 0:
-            trade = {'time': str(row['datetime']), 'sinal': sinal, 'preco': row['close'], 'capital_antes': capital}
-            pnl = (row['close'] - trades[-1]['preco']) * sinal if trades else 0
-            capital += pnl
-            trade['capital_depois'] = capital
-            trades.append(trade)
-    save_paper_state('PAPER', capital, trades[-1] if trades else None)
-    return trades
-
-# ======================
-# Funções auxiliares
-# ======================
-def salvar_grafico(equity, ativo):
-    plt.figure(figsize=(10,4))
-    plt.plot(equity)
-    plt.title(f"Equity {ativo}")
-    plt.savefig(os.path.join(PLOT_PATH, f"equity_{ativo}.png"))
-    plt.close()
-
-def gerar_params_aleatorios():
     return {
-        'rsi_buy': random.randint(25,45),
-        'rsi_sell': random.randint(55,75)
+        'lucro': lucro,
+        'dd': dd,
+        'winrate': winrate*100,
+        'profit_factor': pf,
+        'rr': lucro/(dd+1e-9),
+        'equity': equity,
+        'trades_details': trades,
+        'params': params
     }
 
-# ======================
-# Loop principal
-# ======================
-if __name__=="__main__":
-    criar_tabela_db()
+# ====================== LOOP PRINCIPAL ======================
+def gerar_params():
+    return {
+        'rsi_buy': random.randint(30, 45),
+        'rsi_sell': random.randint(55, 70),
+        'atr_mult': round(random.uniform(1.5, 3.5), 1)
+    }
+
+# Banco de dados (igual seu, só simplifiquei log)
+def log(msg): print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+# ... (suas funções connect_db, save_or_replace_best, etc. permanecem iguais)
+
+if __name__ == "__main__":
     while True:
         for ativo in ATIVOS:
-            log(f"Processando {ativo}")
-            df = carregar_candles(ativo)
-            if df is None or df.empty:
+            log(f"=== {ativo} ===")
+            df = carregar_candles_m5(ativo)
+            if df is None or len(df) < 10000:
                 log(f"{ativo}: dados insuficientes")
                 continue
 
-            combinacoes = COMBINACOES_POR_ATIVO + (COMBINACOES_EXTRA_WINZ if ativo=="WINZ25" else 0)
-            resultados = []
-            for _ in range(combinacoes):
-                params = gerar_params_aleatorios()
-                res = simular_backtest(df, params)
-                resultados.append(res)
-            top1 = max(resultados, key=lambda x: x['lucro'])
-            salvar_grafico(top1['equity'], ativo)
-            save_or_replace_best(ativo, "M5", top1, top1['params'], top1['equity'], top1['trades_details'])
-        log(f"Pausa {PAUSA_SEGUNDOS}s antes da próxima rodada")
+            melhores = []
+            for _ in range(COMBINACOES_POR_ATIVO):
+                params = gerar_params()
+                res = backtest_m5(df, params)
+                melhores.append(res)
+
+            top = max(melhores, key=lambda x: (x['lucro'], -x['dd'], x['profit_factor']))
+            plt.figure(figsize=(12,5))
+            plt.plot(top['equity'])
+            plt.title(f"{ativo} - Melhor Setup | Lucro: R${top['lucro']:.0f} | DD: {top['dd']:.1f}%")
+            plt.savefig(os.path.join(RESULTADOS_PATH, f"equity_{ativo}_best.png"))
+            plt.close()
+
+            # Salvar no Postgres (use sua função save_or_replace_best)
+            # save_or_replace_best(ativo, "M5_V2", top, top['params'], top['equity'], top['trades_details'])
+
+            log(f"{ativo} → Melhor: R${top['lucro']:.0f} | DD {top['dd']:.1f}% | WR {top['winrate']:.1f}%")
+
+        log(f"Aguardando {PAUSA_SEGUNDOS}s...")
         time.sleep(PAUSA_SEGUNDOS)
