@@ -1084,6 +1084,9 @@ def run_for_symbol(symbol, patterns_or_files):
         final_signal[ (final_signal == -1) & (ml_preds_aligned > (1-best_ml_threshold)) ] = 0
         final_pnl, _ = simulate_trades(df, final_signal, sl_ens_atr, tp_ens_atr, cfg['point_value'], cfg['commission'], cfg['slippage_points'], asset_name=symbol)
         final_metrics = metrics_from_pnl(final_pnl)
+        # --- FIX: Save the optimized ML threshold to the metrics dictionary ---
+        if final_metrics:
+            final_metrics['optimized_ml_threshold'] = best_ml_threshold
 
     out = {
         'symbol': symbol,

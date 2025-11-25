@@ -9,6 +9,7 @@ venv_mt5/
 *.csv
 *.xlsx
 *.pkl
+*.joblib
 *.pickle
 data/
 dados/
