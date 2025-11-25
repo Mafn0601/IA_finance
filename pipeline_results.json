@@ -1,1 +1,257 @@
-{}
+{
+  "PETR4": {
+    "symbol": "PETR4",
+    "top_strategies": [
+      {
+        "family": "macross",
+        "params": {
+          "fast": 13,
+          "slow": 50
+        },
+        "sl_atr": 2.9,
+        "tp_atr": 5.65
+      },
+      {
+        "family": "macross",
+        "params": {
+          "fast": 13,
+          "slow": 50
+        },
+        "sl_atr": 2.91,
+        "tp_atr": 5.66
+      },
+      {
+        "family": "macross",
+        "params": {
+          "fast": 13,
+          "slow": 50
+        },
+        "sl_atr": 2.9,
+        "tp_atr": 5.64
+      },
+      {
+        "family": "macross",
+        "params": {
+          "fast": 13,
+          "slow": 50
+        },
+        "sl_atr": 2.91,
+        "tp_atr": 5.65
+      },
+      {
+        "family": "macross",
+        "params": {
+          "fast": 13,
+          "slow": 50
+        },
+        "sl_atr": 2.92,
+        "tp_atr": 5.66
+      },
+      {
+        "family": "macross",
+        "params": {
+          "fast": 13,
+          "slow": 50
+        },
+        "sl_atr": 2.91,
+        "tp_atr": 5.64
+      }
+    ],
+    "ensemble_metrics": {
+      "profit": -3.721428571428542,
+      "sharpe": -5.225,
+      "trades": 102,
+      "winrate": 25.49019607843137,
+      "pf": 0.465,
+      "maxdd": 3.87,
+      "sortino": -21.536,
+      "best_sl_atr": 1.0,
+      "best_tp_atr": 5.0
+    },
+    "final_ml_filtered_metrics": {
+      "profit": -1.4621428571428612,
+      "sharpe": -11.055,
+      "trades": 26,
+      "winrate": 15.384615384615385,
+      "pf": 0.243,
+      "maxdd": 1.43,
+      "sortino": -33.003
+    },
+    "ml_aucs": [
+      0.5135124837802297,
+      0.5034755770852365,
+      0.4842665085228973,
+      0.4933943202255923,
+      0.4881440526264737
+    ],
+    "data_points": 19936
+  },
+  "WIN": {
+    "symbol": "WIN",
+    "top_strategies": [
+      {
+        "family": "pullback",
+        "params": {
+          "vol_mult": 1.3746093750000001
+        },
+        "sl_atr": 2.08,
+        "tp_atr": 4.12
+      },
+      {
+        "family": "pullback",
+        "params": {
+          "vol_mult": 1.3718750000000002
+        },
+        "sl_atr": 2.09,
+        "tp_atr": 4.12
+      },
+      {
+        "family": "pullback",
+        "params": {
+          "vol_mult": 1.3722656250000003
+        },
+        "sl_atr": 2.09,
+        "tp_atr": 4.12
+      },
+      {
+        "family": "pullback",
+        "params": {
+          "vol_mult": 1.3732421875000003
+        },
+        "sl_atr": 2.09,
+        "tp_atr": 4.12
+      },
+      {
+        "family": "pullback",
+        "params": {
+          "vol_mult": 1.3718750000000002
+        },
+        "sl_atr": 2.1,
+        "tp_atr": 4.12
+      },
+      {
+        "family": "pullback",
+        "params": {
+          "vol_mult": 1.3718750000000002
+        },
+        "sl_atr": 2.11,
+        "tp_atr": 4.12
+      }
+    ],
+    "ensemble_metrics": {
+      "profit": 1036.3428571428567,
+      "sharpe": 0.781,
+      "trades": 182,
+      "winrate": 46.7032967032967,
+      "pf": 1.127,
+      "maxdd": 1848.03,
+      "sortino": 1.458,
+      "best_sl_atr": 3.0,
+      "best_tp_atr": 4.0
+    },
+    "final_ml_filtered_metrics": {
+      "profit": -110.1285714285712,
+      "sharpe": -0.217,
+      "trades": 71,
+      "winrate": 43.66197183098591,
+      "pf": 0.969,
+      "maxdd": 987.14,
+      "sortino": -0.461
+    },
+    "ml_aucs": [
+      0.507228045873392,
+      0.4999316263757213,
+      0.5098204579762957,
+      0.5324506612709304,
+      0.4866481626786539
+    ],
+    "data_points": 19824
+  },
+  "WDO": {
+    "symbol": "WDO",
+    "top_strategies": [
+      {
+        "family": "rsi_reversal",
+        "params": {
+          "buy_level": 16,
+          "sell_level": 82
+        },
+        "sl_atr": 2.99,
+        "tp_atr": 6.22
+      },
+      {
+        "family": "rsi_reversal",
+        "params": {
+          "buy_level": 16,
+          "sell_level": 82
+        },
+        "sl_atr": 2.99,
+        "tp_atr": 6.21
+      },
+      {
+        "family": "rsi_reversal",
+        "params": {
+          "buy_level": 16,
+          "sell_level": 82
+        },
+        "sl_atr": 3.03,
+        "tp_atr": 6.23
+      },
+      {
+        "family": "rsi_reversal",
+        "params": {
+          "buy_level": 16,
+          "sell_level": 82
+        },
+        "sl_atr": 2.77,
+        "tp_atr": 6.24
+      },
+      {
+        "family": "rsi_reversal",
+        "params": {
+          "buy_level": 16,
+          "sell_level": 82
+        },
+        "sl_atr": 2.77,
+        "tp_atr": 6.23
+      },
+      {
+        "family": "rsi_reversal",
+        "params": {
+          "buy_level": 16,
+          "sell_level": 82
+        },
+        "sl_atr": 2.8,
+        "tp_atr": 6.26
+      }
+    ],
+    "ensemble_metrics": {
+      "profit": -1443.9650000000258,
+      "sharpe": -2.031,
+      "trades": 123,
+      "winrate": 30.89430894308943,
+      "pf": 0.732,
+      "maxdd": 2123.85,
+      "sortino": -5.795,
+      "best_sl_atr": 1.0,
+      "best_tp_atr": 4.0
+    },
+    "final_ml_filtered_metrics": {
+      "profit": -973.4314285714297,
+      "sharpe": -2.842,
+      "trades": 68,
+      "winrate": 29.411764705882355,
+      "pf": 0.661,
+      "maxdd": 1504.08,
+      "sortino": -9.884
+    },
+    "ml_aucs": [
+      0.536079108382574,
+      0.4925388013287939,
+      0.5320697861463373,
+      0.5083658966014764,
+      0.5366350778871188
+    ],
+    "data_points": 19806
+  }
+}

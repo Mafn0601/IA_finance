@@ -45,23 +45,31 @@ for i,(k, cfg) in enumerate(ATIVOS.items()):
             st.warning("Símbolo indisponível no MT5")
             continue
 
-        sinal, preco = sinais.gerar_sinal_IA(cfg['symbol'], mt5.TIMEFRAME_M5)
+        # --- IMPROVEMENT: Unpack all values from the backend ---
+        sinal, preco, confianca, sl_atr, tp_atr, atr_val = sinais.gerar_sinal_IA(cfg['symbol'], mt5.TIMEFRAME_M5)
         preco_display = round(preco, cfg['decimais']) if preco else None
 
         if sinal:
             color = "green" if sinal == "COMPRA" else "red"
             st.markdown(f"<h2 style='color:{color};'>→ {sinal} @ {preco_display}</h2>", unsafe_allow_html=True)
-            st.caption(f"SL: {cfg['sl_pontos']} pts | TPs: {cfg['tp_pontos']}")
+            
+            # --- IMPROVEMENT: Display dynamic SL/TP and confidence ---
+            sl_em_reais = (sl_atr * atr_val) if atr_val else (cfg['sl_pontos'] * cfg['ponto'])
+            tp_em_reais = (tp_atr * atr_val) if atr_val else (cfg['tp_pontos'][0] * cfg['ponto'])
+            st.caption(f"Confiança: {confianca:.2%} | SL ATR: {sl_atr} | TP ATR: {tp_atr}")
+
             if st.button(f"EXECUTAR {sinal} (3 SAÍDAS) - {cfg['symbol']}", key=f"btn_{cfg['symbol']}"):
-                # prepara sl/tps
-                ponto = cfg['ponto']
-                sl = preco - cfg['sl_pontos'] * ponto if sinal == "COMPRA" else preco + cfg['sl_pontos'] * ponto
+                # --- IMPROVEMENT: Use dynamic SL/TP for order execution ---
+                sl = preco - sl_em_reais if sinal == "COMPRA" else preco + sl_em_reais
                 tps = []
+                # Use the optimized TP multiplier for the first exit, then scale for subsequent exits
                 for tp_mul in cfg['tp_pontos']:
+                    # This is a simple scaling example. You might want a more sophisticated logic.
+                    current_tp_atr = tp_atr * (tp_mul / cfg['tp_pontos'][0])
                     if sinal == "COMPRA":
-                        tps.append(preco + tp_mul * ponto)
+                        tps.append(preco + (current_tp_atr * atr_val))
                     else:
-                        tps.append(preco - tp_mul * ponto)
+                        tps.append(preco - (current_tp_atr * atr_val))
                 # envia TPs parciais (volume 1 por TP)
                 resultados = []
                 sucesso_total = True
