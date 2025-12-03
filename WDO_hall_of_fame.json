@@ -6,6 +6,16 @@
       "sell_level": 82
     },
     "sl_atr": 2.99,
+    "tp_atr": 6.23,
+    "direction": 1
+  },
+  {
+    "family": "rsi_reversal",
+    "params": {
+      "buy_level": 16,
+      "sell_level": 82
+    },
+    "sl_atr": 2.99,
     "tp_atr": 6.22,
     "direction": 1
   },
@@ -25,7 +35,17 @@
       "buy_level": 16,
       "sell_level": 82
     },
-    "sl_atr": 3.03,
+    "sl_atr": 3.0,
+    "tp_atr": 6.22,
+    "direction": 1
+  },
+  {
+    "family": "rsi_reversal",
+    "params": {
+      "buy_level": 16,
+      "sell_level": 82
+    },
+    "sl_atr": 3.01,
     "tp_atr": 6.23,
     "direction": 1
   },
@@ -35,28 +55,8 @@
       "buy_level": 16,
       "sell_level": 82
     },
-    "sl_atr": 2.77,
-    "tp_atr": 6.24,
-    "direction": 1
-  },
-  {
-    "family": "rsi_reversal",
-    "params": {
-      "buy_level": 16,
-      "sell_level": 82
-    },
-    "sl_atr": 2.77,
-    "tp_atr": 6.23,
-    "direction": 1
-  },
-  {
-    "family": "rsi_reversal",
-    "params": {
-      "buy_level": 16,
-      "sell_level": 82
-    },
-    "sl_atr": 2.8,
-    "tp_atr": 6.26,
+    "sl_atr": 3.01,
+    "tp_atr": 6.22,
     "direction": 1
   }
 ]

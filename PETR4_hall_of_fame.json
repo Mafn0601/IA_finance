@@ -6,6 +6,16 @@
       "slow": 50
     },
     "sl_atr": 2.9,
+    "tp_atr": 5.66,
+    "direction": 1
+  },
+  {
+    "family": "macross",
+    "params": {
+      "fast": 13,
+      "slow": 50
+    },
+    "sl_atr": 2.9,
     "tp_atr": 5.65,
     "direction": 1
   },
@@ -47,16 +57,6 @@
     },
     "sl_atr": 2.92,
     "tp_atr": 5.66,
-    "direction": 1
-  },
-  {
-    "family": "macross",
-    "params": {
-      "fast": 13,
-      "slow": 50
-    },
-    "sl_atr": 2.91,
-    "tp_atr": 5.64,
     "direction": 1
   }
 ]

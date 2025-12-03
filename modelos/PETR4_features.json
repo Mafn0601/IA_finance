@@ -1,0 +1,13 @@
+{
+  "features": [
+    "close",
+    "ema_9",
+    "ema_21",
+    "ema_50",
+    "rsi_14",
+    "atr_14",
+    "vol",
+    "vol_med",
+    "ens_sig"
+  ]
+}

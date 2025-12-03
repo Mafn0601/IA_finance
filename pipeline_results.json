@@ -9,6 +9,15 @@
           "slow": 50
         },
         "sl_atr": 2.9,
+        "tp_atr": 5.66
+      },
+      {
+        "family": "macross",
+        "params": {
+          "fast": 13,
+          "slow": 50
+        },
+        "sl_atr": 2.9,
         "tp_atr": 5.65
       },
       {
@@ -46,15 +55,6 @@
         },
         "sl_atr": 2.92,
         "tp_atr": 5.66
-      },
-      {
-        "family": "macross",
-        "params": {
-          "fast": 13,
-          "slow": 50
-        },
-        "sl_atr": 2.91,
-        "tp_atr": 5.64
       }
     ],
     "ensemble_metrics": {
@@ -75,7 +75,8 @@
       "winrate": 15.384615384615385,
       "pf": 0.243,
       "maxdd": 1.43,
-      "sortino": -33.003
+      "sortino": -33.003,
+      "optimized_ml_threshold": 0.5
     },
     "ml_aucs": [
       0.5135124837802297,
@@ -100,17 +101,9 @@
       {
         "family": "pullback",
         "params": {
-          "vol_mult": 1.3718750000000002
+          "vol_mult": 1.37392578125
         },
-        "sl_atr": 2.09,
-        "tp_atr": 4.12
-      },
-      {
-        "family": "pullback",
-        "params": {
-          "vol_mult": 1.3722656250000003
-        },
-        "sl_atr": 2.09,
+        "sl_atr": 2.08,
         "tp_atr": 4.12
       },
       {
@@ -118,23 +111,31 @@
         "params": {
           "vol_mult": 1.3732421875000003
         },
+        "sl_atr": 2.08,
+        "tp_atr": 4.12
+      },
+      {
+        "family": "pullback",
+        "params": {
+          "vol_mult": 1.3724121093750004
+        },
+        "sl_atr": 2.08,
+        "tp_atr": 4.12
+      },
+      {
+        "family": "pullback",
+        "params": {
+          "vol_mult": 1.3729003906250001
+        },
+        "sl_atr": 2.08,
+        "tp_atr": 4.12
+      },
+      {
+        "family": "pullback",
+        "params": {
+          "vol_mult": 1.3718750000000002
+        },
         "sl_atr": 2.09,
-        "tp_atr": 4.12
-      },
-      {
-        "family": "pullback",
-        "params": {
-          "vol_mult": 1.3718750000000002
-        },
-        "sl_atr": 2.1,
-        "tp_atr": 4.12
-      },
-      {
-        "family": "pullback",
-        "params": {
-          "vol_mult": 1.3718750000000002
-        },
-        "sl_atr": 2.11,
         "tp_atr": 4.12
       }
     ],
@@ -156,7 +157,8 @@
       "winrate": 43.66197183098591,
       "pf": 0.969,
       "maxdd": 987.14,
-      "sortino": -0.461
+      "sortino": -0.461,
+      "optimized_ml_threshold": 0.5
     },
     "ml_aucs": [
       0.507228045873392,
@@ -170,6 +172,15 @@
   "WDO": {
     "symbol": "WDO",
     "top_strategies": [
+      {
+        "family": "rsi_reversal",
+        "params": {
+          "buy_level": 16,
+          "sell_level": 82
+        },
+        "sl_atr": 2.99,
+        "tp_atr": 6.23
+      },
       {
         "family": "rsi_reversal",
         "params": {
@@ -194,7 +205,16 @@
           "buy_level": 16,
           "sell_level": 82
         },
-        "sl_atr": 3.03,
+        "sl_atr": 3.0,
+        "tp_atr": 6.22
+      },
+      {
+        "family": "rsi_reversal",
+        "params": {
+          "buy_level": 16,
+          "sell_level": 82
+        },
+        "sl_atr": 3.01,
         "tp_atr": 6.23
       },
       {
@@ -203,26 +223,8 @@
           "buy_level": 16,
           "sell_level": 82
         },
-        "sl_atr": 2.77,
-        "tp_atr": 6.24
-      },
-      {
-        "family": "rsi_reversal",
-        "params": {
-          "buy_level": 16,
-          "sell_level": 82
-        },
-        "sl_atr": 2.77,
-        "tp_atr": 6.23
-      },
-      {
-        "family": "rsi_reversal",
-        "params": {
-          "buy_level": 16,
-          "sell_level": 82
-        },
-        "sl_atr": 2.8,
-        "tp_atr": 6.26
+        "sl_atr": 3.01,
+        "tp_atr": 6.22
       }
     ],
     "ensemble_metrics": {
@@ -243,7 +245,8 @@
       "winrate": 29.411764705882355,
       "pf": 0.661,
       "maxdd": 1504.08,
-      "sortino": -9.884
+      "sortino": -9.884,
+      "optimized_ml_threshold": 0.5
     },
     "ml_aucs": [
       0.536079108382574,
